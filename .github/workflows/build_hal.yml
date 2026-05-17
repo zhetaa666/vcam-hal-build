@@ -31,8 +31,8 @@ jobs:
       - name: Maximize disk space
         uses: easimon/maximize-build-space@v10
         with:
-          root-reserve-mb: 12288       # 12GB free di root (was 4GB, terbukti gak cukup)
-          swap-size-mb: 8192
+          root-reserve-mb: 12288       # 12GB free di root
+          swap-size-mb: 16384          # 16GB swap (was 8GB) — buffer RAM spike saat sync
           remove-dotnet: 'true'
           remove-android: 'true'
           remove-haskell: 'true'
@@ -78,11 +78,11 @@ jobs:
       - name: Repo init
         working-directory: /mnt/aosp
         run: |
+          # Drop --partial-clone --clone-filter — itu bikin RAM bengkak
           /mnt/aosp/bin/repo init \
             -u https://android.googlesource.com/platform/manifest \
             -b ${{ github.event.inputs.aosp_branch }} \
-            --depth=1 --no-tags --no-clone-bundle \
-            --partial-clone --clone-filter=blob:limit=10M
+            --depth=1 --no-tags --no-clone-bundle
 
       # ---------- Step 5: MINIMAL local manifest (hanya CTS yang dipastikan ada) ----------
       - name: Apply minimal local manifest
@@ -96,13 +96,51 @@ jobs:
           </manifest>
           EOF
 
-      # ---------- Step 6: Repo sync ----------
-      - name: Repo sync
+      # ---------- Step 6a: Start memory monitor (background) ----------
+      - name: Start memory monitor
+        run: |
+          mkdir -p /mnt/aosp/logs
+          (while true; do
+             echo "[$(date +%H:%M:%S)] $(free -m | grep -E 'Mem|Swap' | tr '\n' ' | ')" >> /mnt/aosp/logs/memory.log
+             df -h /mnt/aosp / 2>/dev/null | tail -2 >> /mnt/aosp/logs/disk.log
+             sleep 30
+           done) &
+          echo $! > /tmp/monitor.pid
+
+      # ---------- Step 6b: Repo sync dengan retry loop ----------
+      - name: Repo sync (with retry)
         working-directory: /mnt/aosp
         run: |
-          /mnt/aosp/bin/repo sync \
-            -c -j4 --force-sync --no-clone-bundle \
-            --no-tags --optimized-fetch --fail-fast
+          set +e  # jangan exit on error — kita handle manual
+          MAX_RETRY=3
+          for i in $(seq 1 $MAX_RETRY); do
+            echo "===== Sync attempt $i / $MAX_RETRY ====="
+            /mnt/aosp/bin/repo sync \
+              -c -j2 --force-sync --no-clone-bundle \
+              --no-tags --optimized-fetch
+            RC=$?
+            if [ $RC -eq 0 ]; then
+              echo "===== Sync sukses di attempt $i ====="
+              exit 0
+            fi
+            echo "===== Sync gagal (exit $RC), tunggu 60s lalu retry ====="
+            sleep 60
+            # Free memory aggressively before retry
+            sync && echo 3 | sudo tee /proc/sys/vm/drop_caches >/dev/null || true
+          done
+          echo "===== Sync gagal setelah $MAX_RETRY attempts ====="
+          exit 1
+
+      - name: Stop memory monitor
+        if: always()
+        run: |
+          if [ -f /tmp/monitor.pid ]; then
+            kill $(cat /tmp/monitor.pid) 2>/dev/null || true
+          fi
+          echo "=== Memory log tail ==="
+          tail -50 /mnt/aosp/logs/memory.log || true
+          echo "=== Disk log tail ==="
+          tail -30 /mnt/aosp/logs/disk.log || true
 
       - name: Disk after sync
         run: df -h
@@ -208,5 +246,14 @@ jobs:
         with:
           name: build-log
           path: /mnt/aosp/build.log
+          retention-days: 14
+          if-no-files-found: ignore
+
+      - name: Upload monitor logs (always)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: monitor-logs
+          path: /mnt/aosp/logs/
           retention-days: 14
           if-no-files-found: ignore
