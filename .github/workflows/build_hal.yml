@@ -12,9 +12,9 @@ on:
   workflow_dispatch:
     inputs:
       aosp_branch:
-        description: 'AOSP branch tag (cek tag terbaru di https://android.googlesource.com/platform/manifest/+refs)'
+        description: 'AOSP branch (rec: android16-qpr2-release)'
         required: true
-        default: 'android-16.0.0_r1'
+        default: 'android16-qpr2-release'
       build_variant:
         description: 'lunch target'
         required: true
@@ -24,14 +24,14 @@ jobs:
   build:
     name: Build External Camera HAL
     runs-on: ubuntu-22.04
-    timeout-minutes: 350   # 5h50m — max free tier 6h
+    timeout-minutes: 350
 
     steps:
-      # ---------- Step 1: Free up disk (CRITICAL) ----------
-      - name: Maximize disk space (~75GB free)
+      # ---------- Step 1: Free up disk ----------
+      - name: Maximize disk space
         uses: easimon/maximize-build-space@v10
         with:
-          root-reserve-mb: 4096
+          root-reserve-mb: 12288       # 12GB free di root (was 4GB, terbukti gak cukup)
           swap-size-mb: 8192
           remove-dotnet: 'true'
           remove-android: 'true'
@@ -40,12 +40,12 @@ jobs:
           remove-docker-images: 'true'
           build-mount-path: '/mnt/aosp'
 
-      - name: Show disk space after cleanup
+      - name: Show disk after cleanup
         run: |
           df -h
           free -h
 
-      # ---------- Step 2: Install AOSP build dependencies ----------
+      # ---------- Step 2: Install AOSP build deps + clean cache ----------
       - name: Install AOSP build deps
         run: |
           sudo apt-get update -qq
@@ -55,60 +55,86 @@ jobs:
             lib32z1-dev libgl1-mesa-dev libxml2-utils xsltproc unzip \
             fontconfig openjdk-17-jdk python3 python3-pip ccache rsync \
             libssl-dev bc cpio kmod
+          # Bersihkan apt cache untuk hemat root partition
+          sudo apt-get clean
+          sudo rm -rf /var/lib/apt/lists/*
           sudo chown -R $USER:$USER /mnt/aosp
 
+      - name: Disk after install
+        run: df -h /
+
+      # ---------- Step 3: Install repo tool ke /mnt/aosp/bin (BUKAN $HOME) ----------
       - name: Install repo tool
         run: |
-          mkdir -p $HOME/bin
-          curl -s https://storage.googleapis.com/git-repo-downloads/repo > $HOME/bin/repo
-          chmod a+x $HOME/bin/repo
-          echo "$HOME/bin" >> $GITHUB_PATH
+          mkdir -p /mnt/aosp/bin
+          curl -s https://storage.googleapis.com/git-repo-downloads/repo > /mnt/aosp/bin/repo
+          chmod a+x /mnt/aosp/bin/repo
+          echo "/mnt/aosp/bin" >> $GITHUB_PATH
           git config --global user.email "santuyajah6@gmail.com"
           git config --global user.name "Santuyajah"
           git config --global color.ui false
 
-      # ---------- Step 3: Init AOSP manifest (depth=1, partial clone) ----------
-      - name: Repo init AOSP
+      # ---------- Step 4: Init AOSP manifest ----------
+      - name: Repo init
         working-directory: /mnt/aosp
         run: |
-          $HOME/bin/repo init \
+          /mnt/aosp/bin/repo init \
             -u https://android.googlesource.com/platform/manifest \
             -b ${{ github.event.inputs.aosp_branch }} \
             --depth=1 --no-tags --no-clone-bundle \
             --partial-clone --clone-filter=blob:limit=10M
 
-      # ---------- Step 4: Local manifest — skip heavy unused projects ----------
-      - name: Apply local manifest exclusions
+      # ---------- Step 5: MINIMAL local manifest (hanya CTS yang dipastikan ada) ----------
+      - name: Apply minimal local manifest
         working-directory: /mnt/aosp
         run: |
           mkdir -p .repo/local_manifests
-          cat > .repo/local_manifests/skip_heavy.xml << 'EOF'
+          cat > .repo/local_manifests/skip_safe.xml << 'EOF'
           <?xml version="1.0" encoding="UTF-8"?>
           <manifest>
             <remove-project name="platform/cts"/>
-            <remove-project name="platform/test/vts-testcase/security"/>
-            <remove-project name="platform/test/vts-testcase/kernel"/>
-            <remove-project name="platform/external/chromium-webview/prebuilt-arm"/>
-            <remove-project name="platform/external/chromium-webview/prebuilt-arm64"/>
-            <remove-project name="platform/external/chromium-webview/prebuilt-x86"/>
-            <remove-project name="platform/external/chromium-webview/prebuilt-x86_64"/>
-            <remove-project name="kernel/common"/>
-            <remove-project name="kernel/common-modules/virtual-device"/>
-            <remove-project name="platform/prebuilts/abi-dumps/platform"/>
-            <remove-project name="platform/prebuilts/abi-dumps/vndk"/>
-            <remove-project name="platform/prebuilts/abi-dumps/ndk"/>
-            <remove-project name="platform/external/llvm-project"/>
-            <remove-project name="platform/prebuilts/fuchsia_sdk"/>
           </manifest>
           EOF
 
-      # ---------- Step 5: Sync source (~2 jam pertama kali) ----------
+      # ---------- Step 6: Repo sync ----------
       - name: Repo sync
         working-directory: /mnt/aosp
         run: |
-          $HOME/bin/repo sync \
+          /mnt/aosp/bin/repo sync \
             -c -j4 --force-sync --no-clone-bundle \
             --no-tags --optimized-fetch --fail-fast
+
+      - name: Disk after sync
+        run: df -h
+
+      # ---------- Step 7: Post-sync cleanup (rm proyek besar tak dipakai) ----------
+      - name: Post-sync cleanup (free disk for build)
+        working-directory: /mnt/aosp
+        run: |
+          echo "=== Sebelum cleanup ==="
+          du -sh . 2>/dev/null | tail -1
+          # Hapus proyek besar yang TIDAK dibutuhkan untuk build camera HAL
+          # Pakai 'true' biar tidak fail kalau folder tidak ada
+          for d in \
+            test/vts test/vts-testcase \
+            external/chromium-webview \
+            external/cronet \
+            kernel/common kernel/common-modules \
+            prebuilts/abi-dumps \
+            external/llvm-project \
+            prebuilts/fuchsia_sdk \
+            developers \
+            docs \
+            tools/test \
+            cts ; do
+            if [ -e "$d" ]; then
+              echo "Removing $d ..."
+              rm -rf "$d" || true
+            fi
+          done
+          echo "=== Setelah cleanup ==="
+          du -sh . 2>/dev/null | tail -1
+          df -h /mnt/aosp
 
       - name: Verify external camera HAL source exists
         working-directory: /mnt/aosp
@@ -117,11 +143,9 @@ jobs:
           ls -la hardware/interfaces/camera/provider/2.4/default/ || exit 1
           echo "=== device/3.4/default ==="
           ls -la hardware/interfaces/camera/device/3.4/default/ || exit 1
-          echo "=== ExternalCameraProvider source ==="
-          ls -la hardware/interfaces/camera/provider/2.4/default/*External* || true
 
-      # ---------- Step 6: Build (single-target, arm64-only) ----------
-      - name: Build external camera HAL targets
+      # ---------- Step 8: Build ----------
+      - name: Build external camera HAL
         working-directory: /mnt/aosp
         run: |
           set -e
@@ -133,59 +157,42 @@ jobs:
           ccache -M 8G
           ccache -z
 
-          # Build target binaries (arm64)
           m -j$(nproc) \
             android.hardware.camera.provider@2.4-external-service \
             camera.device@3.4-external-impl \
-            2>&1 | tee /tmp/build.log
+            2>&1 | tee /mnt/aosp/build.log
 
           ccache -s
 
-      # ---------- Step 7: Collect artifacts ----------
-      - name: Collect HAL artifacts
+      # ---------- Step 9: Collect ----------
+      - name: Collect artifacts
         working-directory: /mnt/aosp
         run: |
           mkdir -p $GITHUB_WORKSPACE/artifacts/vendor/bin/hw
           mkdir -p $GITHUB_WORKSPACE/artifacts/vendor/lib64/hw
-          mkdir -p $GITHUB_WORKSPACE/artifacts/vendor/etc/init
-          mkdir -p $GITHUB_WORKSPACE/artifacts/vendor/etc/vintf/manifest
           mkdir -p $GITHUB_WORKSPACE/artifacts/source_reference
 
-          # 1. Service binary
-          echo "=== Searching for service binary ==="
           find out -type f -name "android.hardware.camera.provider@2.4-external-service" \
             -not -path "*/symbols/*" -not -path "*/unstripped/*" \
             -exec cp -v {} $GITHUB_WORKSPACE/artifacts/vendor/bin/hw/ \;
 
-          # 2. HAL impl .so
-          echo "=== Searching for HAL .so ==="
           find out -type f -name "camera.device@3.4-external-impl.so" \
             -not -path "*/symbols/*" -not -path "*/unstripped/*" \
             -exec cp -v {} $GITHUB_WORKSPACE/artifacts/vendor/lib64/hw/ \;
 
-          # 3. Service init.rc (reference)
           find out -type f -name "*camera*external*.rc" \
-            -exec cp -v {} $GITHUB_WORKSPACE/artifacts/vendor/etc/init/ \; || true
-          find hardware -type f -name "*external*.rc" \
-            -exec cp -v {} $GITHUB_WORKSPACE/artifacts/source_reference/ \; || true
-
-          # 4. VINTF fragment reference (from AOSP source)
-          find hardware/interfaces/camera -type f -name "*manifest*.xml" \
-            -exec cp -v {} $GITHUB_WORKSPACE/artifacts/source_reference/ \; || true
-
-          # 5. SELinux policy reference (search relevant .te)
+            -exec cp -v {} $GITHUB_WORKSPACE/artifacts/source_reference/ \; 2>/dev/null || true
+          find hardware/interfaces/camera -type f -name "manifest*.xml" \
+            -exec cp -v {} $GITHUB_WORKSPACE/artifacts/source_reference/ \; 2>/dev/null || true
           find . -type f -name "hal_camera*.te" \
             -exec cp -v {} $GITHUB_WORKSPACE/artifacts/source_reference/ \; 2>/dev/null || true
 
-      - name: Show final artifact listing
+      - name: Show final artifacts
         run: |
-          echo "=== Final artifacts ==="
           find $GITHUB_WORKSPACE/artifacts -type f -exec ls -la {} \;
-          echo ""
-          echo "=== Total size ==="
           du -sh $GITHUB_WORKSPACE/artifacts/
 
-      # ---------- Step 8: Upload (success path) ----------
+      # ---------- Step 10: Upload ----------
       - name: Upload HAL artifacts
         if: success()
         uses: actions/upload-artifact@v4
@@ -195,12 +202,11 @@ jobs:
           retention-days: 30
           if-no-files-found: error
 
-      # ---------- Step 9: Always upload build log for debugging ----------
       - name: Upload build log
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: build-log
-          path: /tmp/build.log
+          path: /mnt/aosp/build.log
           retention-days: 14
           if-no-files-found: ignore
