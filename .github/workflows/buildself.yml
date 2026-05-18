@@ -1,4 +1,4 @@
-name: Build External Camera HAL (AIDL V1) v10.2 (Self-Hosted Final)
+name: Build External Camera HAL (AIDL V1) v10.3 (Self-Hosted Final)
 
 on:
   workflow_dispatch:
@@ -52,6 +52,9 @@ jobs:
         run: |
           echo "Menghapus folder test yang mencari dependency cts_defaults dll..."
           for d in \
+            packages/modules/Profiling/tests \
+            packages/modules/DeviceLock/tests \
+            packages/modules/StatsD/tests \
             packages/modules/Connectivity/nearby/tests \
             packages/modules/Connectivity/remoteauth/tests \
             packages/modules/Connectivity/Vcn/tests \
