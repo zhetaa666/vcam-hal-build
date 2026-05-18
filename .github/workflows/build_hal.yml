@@ -1,10 +1,17 @@
-name: Build External Camera HAL (AIDL V1) — v9
+name: Build External Camera HAL (AIDL V1) — v9.1
 
 # ============================================================================
-# Phase 4A v9 — VCam Project (Santuyajah)
+# Phase 4A v9.1 — VCam Project (Santuyajah)
 # Target: android.hardware.camera.provider-V1-external-service (arm64)
 # Plus:   android.hardware.camera.provider-V1-external-impl.so
 #         camera.device-external-impl.so
+#
+# Perubahan v9.1 vs v9:
+#   - v9 fail karena local_manifest reference project yang tidak ada di branch
+#     android16-qpr2-release (e.g. platform/external/llvm-project sudah pindah)
+#     -> seluruh parse manifest fatal -> 0 byte output.
+#   - Fix: local_manifest minimal saja (cuma cts, dengan optional="true").
+#   - Size cap dipindah ke post-sync rm -rf (di Step 8).
 #
 # Perubahan v9 vs v8:
 #   - Ganti -g default,-pdk,... menjadi -g all,-notdefault,-pdk,... 
@@ -12,9 +19,7 @@ name: Build External Camera HAL (AIDL V1) — v9
 #      ke-include, hardware/interfaces missing). 
 #     "all"  = match SEMUA project terlepas group apa
 #     "-notdefault" = exclude project yang explicit notdefault (langka)
-#   - Pre-sync validation sekarang juga retry dengan re-init tanpa -g kalau
-#     hardware/interfaces masih missing (auto-fallback)
-#   - Local manifest tambah remove untuk Chromium/LLVM/Fuchsia SDK (size cap)
+#   - Pre-sync validation auto-fallback re-init tanpa -g kalau masih missing
 # ============================================================================
 
 on:
@@ -170,26 +175,23 @@ jobs:
             -g all,-notdefault,-pdk,-pdk-cw,-pdk-fs,-cts,-vts,-tests \
             --depth=1 --no-tags --no-clone-bundle
 
-      # ---------- Step 6: Local manifest (v9: tambah aggressive removes) ----------
-      - name: Apply local manifest with aggressive size caps
+      # ---------- Step 6: Local manifest (v9.1: minimal + optional="true") ----------
+      # v9.1 FIX: di v9 saya pakai remove-project untuk project yang
+      # ternyata tidak ada di manifest android16-qpr2-release (cth:
+      # platform/external/llvm-project sudah pindah). Itu bikin SELURUH
+      # parse manifest fatal -> output 0 byte.
+      # Solusi: pakai optional="true" supaya remove-project tidak fatal
+      # kalau project tidak ada. Plus drop project yang tidak yakin ada.
+      # Size cap nanti via rm -rf POST-sync, bukan via local_manifest.
+      - name: Apply minimal local manifest
         working-directory: /mnt/aosp
         run: |
           mkdir -p .repo/local_manifests
           cat > .repo/local_manifests/skip_safe.xml << 'EOF'
           <?xml version="1.0" encoding="UTF-8"?>
           <manifest>
-            <!-- Test suites: tidak dibutuhkan untuk build HAL module -->
-            <remove-project name="platform/cts"/>
-
-            <!-- Chromium webview / browser: 5+GB, tidak relevan dengan camera HAL -->
-            <remove-project name="platform/external/chromium-webview"/>
-            <remove-project name="platform/external/cronet"/>
-
-            <!-- LLVM project source: kita pakai prebuilt clang, tidak build LLVM -->
-            <remove-project name="platform/external/llvm-project"/>
-
-            <!-- Fuchsia SDK: tidak relevan -->
-            <remove-project name="platform/prebuilts/fuchsia_sdk"/>
+            <!-- platform/cts confirmed exist (v7 sync sukses dengan ini) -->
+            <remove-project name="platform/cts" optional="true"/>
           </manifest>
           EOF
           cat .repo/local_manifests/skip_safe.xml
@@ -302,18 +304,40 @@ jobs:
         if: always()
         run: df -h
 
-      # ---------- Step 8: Post-sync cleanup ----------
-      - name: Post-sync cleanup (safe targets only)
+      # ---------- Step 8: Post-sync cleanup (v9.1: aggressive size cap) ----------
+      # v9.1: pindah size cap ke sini, dari local_manifest yang error-prone.
+      # rm -rf aman: kalau folder tidak ada, skip diam-diam.
+      - name: Post-sync cleanup (aggressive size cap)
         working-directory: /mnt/aosp
         run: |
           echo "=== Sebelum cleanup ==="
           du -sh . 2>/dev/null | tail -1
+          df -h /mnt/aosp
           for d in \
-            external/chromium-webview external/cronet \
-            kernel/common kernel/common-modules \
-            prebuilts/abi-dumps external/llvm-project \
-            prebuilts/fuchsia_sdk developers docs ; do
-            [ -e "$d" ] && rm -rf "$d" && echo "Removed $d"
+            external/chromium-webview \
+            external/cronet \
+            external/llvm-project \
+            external/llvm \
+            external/clang \
+            kernel/common \
+            kernel/common-modules \
+            prebuilts/abi-dumps \
+            prebuilts/fuchsia_sdk \
+            prebuilts/qemu-kernel \
+            prebuilts/cmake \
+            prebuilts/ndk \
+            prebuilts/maven_repo \
+            prebuilts/sdk \
+            developers \
+            docs \
+            cts \
+            test/cts-root \
+            test/mts \
+            test/graphics ; do
+            if [ -e "$d" ]; then
+              SIZE=$(du -sh "$d" 2>/dev/null | cut -f1)
+              rm -rf "$d" && echo "Removed $d (was $SIZE)"
+            fi
           done
           echo "=== Setelah cleanup ==="
           du -sh . 2>/dev/null | tail -1
