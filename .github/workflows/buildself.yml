@@ -1,4 +1,4 @@
-name: Build External Camera HAL (AIDL V1) v10.1 (Self-Hosted Resume)
+name: Build External Camera HAL (AIDL V1) v10.2 (Self-Hosted Final)
 
 on:
   workflow_dispatch:
@@ -50,8 +50,13 @@ jobs:
       - name: Preemptive nuke test folders (Menghapus biang kerok error)
         working-directory: /mnt/aosp
         run: |
-          echo "Menghapus folder test yang mencari dependency cts_defaults..."
+          echo "Menghapus folder test yang mencari dependency cts_defaults dll..."
           for d in \
+            packages/modules/Connectivity/nearby/tests \
+            packages/modules/Connectivity/remoteauth/tests \
+            packages/modules/Connectivity/Vcn/tests \
+            packages/modules/Connectivity/networksecurity/tests \
+            test/vts-testcase \
             packages/modules/Uwb/tests \
             packages/modules/Uwb/ranging/tests \
             packages/modules/Nfc/tests \
@@ -88,7 +93,7 @@ jobs:
       - name: Build external camera HAL (Resume with CCache)
         working-directory: /mnt/aosp
         run: |
-          # set -o pipefail agar GitHub action langsung merah (gagal) jika perintah m gagal
+          # set -o pipefail agar GitHub action langsung merah jika m gagal
           set -e
           set -o pipefail
           
@@ -97,9 +102,8 @@ jobs:
           
           export USE_CCACHE=1
           export CCACHE_EXEC=/usr/bin/ccache
-          ccache -M 10G # Limit 10GB agar disk sisa 61GB Anda aman
+          ccache -M 10G
           
-          # Build akan melanjutkan dari log 99% sebelumnya
           m -j$(nproc) \
             android.hardware.camera.provider-V1-external-service \
             android.hardware.camera.provider-V1-external-impl \
@@ -109,7 +113,6 @@ jobs:
       - name: Collect artifacts
         working-directory: /mnt/aosp
         run: |
-          # Membersihkan folder artifacts bawaan runner jika ada sisa
           rm -rf $GITHUB_WORKSPACE/artifacts
           
           mkdir -p $GITHUB_WORKSPACE/artifacts/vendor/bin/hw
