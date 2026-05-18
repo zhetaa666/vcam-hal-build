@@ -264,10 +264,17 @@ jobs:
       - name: Verify external camera HAL source
         working-directory: /mnt/aosp
         run: |
-          ls -la hardware/interfaces/camera/provider/2.4/default/ || exit 1
-          ls -la hardware/interfaces/camera/device/3.4/default/ || exit 1
+          echo "=== camera/provider/default/ (lokasi baru Android 13+) ==="
+          ls -la hardware/interfaces/camera/provider/default/ || exit 1
+          echo ""
+          echo "=== camera/device/default/ (lokasi baru Android 13+) ==="
+          ls -la hardware/interfaces/camera/device/default/ || exit 1
+          echo ""
+          echo "=== Konfirmasi source ExternalCameraProvider.cpp ada ==="
+          test -f hardware/interfaces/camera/provider/default/ExternalCameraProvider.cpp && echo "OK" || exit 1
+          test -f hardware/interfaces/camera/device/default/ExternalCameraDevice.cpp && echo "OK" || exit 1
 
-      # ---------- Step 9: Build ----------
+      # ---------- Step 9: Build (v7: module names baru) ----------
       - name: Build external camera HAL
         working-directory: /mnt/aosp
         run: |
@@ -280,34 +287,60 @@ jobs:
           ccache -M 8G
           ccache -z
 
+          # Module names BARU di Android 13+ (was @2.4-external-service):
+          #   android.hardware.camera.provider-V1-external-service  (binary daemon)
+          #   android.hardware.camera.provider-V1-external-impl     (provider .so)
+          #   camera.device-external-impl                            (device .so)
           m -j$(nproc) \
-            android.hardware.camera.provider@2.4-external-service \
-            camera.device@3.4-external-impl \
+            android.hardware.camera.provider-V1-external-service \
+            android.hardware.camera.provider-V1-external-impl \
+            camera.device-external-impl \
             2>&1 | tee /mnt/aosp/build.log
 
           ccache -s
 
-      # ---------- Step 10: Collect ----------
+      # ---------- Step 10: Collect (v7: nama baru) ----------
       - name: Collect artifacts
         working-directory: /mnt/aosp
         run: |
           mkdir -p $GITHUB_WORKSPACE/artifacts/vendor/bin/hw
           mkdir -p $GITHUB_WORKSPACE/artifacts/vendor/lib64/hw
+          mkdir -p $GITHUB_WORKSPACE/artifacts/vendor/etc/init
           mkdir -p $GITHUB_WORKSPACE/artifacts/source_reference
 
-          find out -type f -name "android.hardware.camera.provider@2.4-external-service" \
+          # Binary service (Android 13+ naming)
+          find out -type f -name "android.hardware.camera.provider-V1-external-service" \
             -not -path "*/symbols/*" -not -path "*/unstripped/*" \
             -exec cp -v {} $GITHUB_WORKSPACE/artifacts/vendor/bin/hw/ \;
 
-          find out -type f -name "camera.device@3.4-external-impl.so" \
+          # Provider impl .so
+          find out -type f -name "android.hardware.camera.provider-V1-external-impl.so" \
             -not -path "*/symbols/*" -not -path "*/unstripped/*" \
             -exec cp -v {} $GITHUB_WORKSPACE/artifacts/vendor/lib64/hw/ \;
 
-          find out -type f -name "*camera*external*.rc" \
+          # Device impl .so
+          find out -type f -name "camera.device-external-impl.so" \
+            -not -path "*/symbols/*" -not -path "*/unstripped/*" \
+            -exec cp -v {} $GITHUB_WORKSPACE/artifacts/vendor/lib64/hw/ \;
+
+          # Init RC files
+          find out -type f -name "android.hardware.camera.provider-V1-external-service*.rc" \
+            -exec cp -v {} $GITHUB_WORKSPACE/artifacts/vendor/etc/init/ \; 2>/dev/null || true
+
+          # Source reference: copy untuk inspect Phase 4B (Android.bp, .te, manifest fragments)
+          cp -v hardware/interfaces/camera/provider/default/Android.bp \
+            $GITHUB_WORKSPACE/artifacts/source_reference/provider_Android.bp 2>/dev/null || true
+          cp -v hardware/interfaces/camera/device/default/Android.bp \
+            $GITHUB_WORKSPACE/artifacts/source_reference/device_Android.bp 2>/dev/null || true
+          cp -v hardware/interfaces/camera/provider/default/*.rc \
+            $GITHUB_WORKSPACE/artifacts/source_reference/ 2>/dev/null || true
+
+          # Cari SELinux .te terkait camera
+          find . -type f \( -name "hal_camera*.te" -o -name "*camera_external*.te" \) \
             -exec cp -v {} $GITHUB_WORKSPACE/artifacts/source_reference/ \; 2>/dev/null || true
-          find hardware/interfaces/camera -type f -name "manifest*.xml" \
-            -exec cp -v {} $GITHUB_WORKSPACE/artifacts/source_reference/ \; 2>/dev/null || true
-          find . -type f -name "hal_camera*.te" \
+
+          # Cari VINTF manifest fragments
+          find . -type f -name "*camera*external*manifest*.xml" \
             -exec cp -v {} $GITHUB_WORKSPACE/artifacts/source_reference/ \; 2>/dev/null || true
 
       - name: Show final artifacts
