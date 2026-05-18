@@ -47,14 +47,6 @@ jobs:
           HOME=/mnt/aosp/home git config --global color.ui false
           HOME=/mnt/aosp/home git config --global pack.threads 4
 
-      - name: Repo sync (Fast Sync)
-        working-directory: /mnt/aosp
-        run: |
-          # Karena file sudah ada di VPS, sync ini hanya makan waktu beberapa detik/menit
-          /mnt/aosp/bin/repo sync \
-            -c -j4 --force-sync --no-clone-bundle \
-            --no-tags --optimized-fetch --fail-fast
-
       - name: Preemptive nuke test folders (Menghapus biang kerok error)
         working-directory: /mnt/aosp
         run: |
