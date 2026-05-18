@@ -1,17 +1,20 @@
-name: Build External Camera HAL (AIDL V1) — v8
+name: Build External Camera HAL (AIDL V1) — v9
 
 # ============================================================================
-# Phase 4A v8 — VCam Project (Santuyajah)
+# Phase 4A v9 — VCam Project (Santuyajah)
 # Target: android.hardware.camera.provider-V1-external-service (arm64)
 # Plus:   android.hardware.camera.provider-V1-external-impl.so
 #         camera.device-external-impl.so
 #
-# Perubahan v8 vs v7:
-#   - Tambah --fail-fast ke repo sync (silent partial fail di v7 = root cause hipotesis #2)
-#   - Tambah step "Diagnose hardware tree" SEBELUM Verify (debug rekomendasi user)
-#   - Tambah step "Auto-recover hardware/interfaces" kalau folder missing
-#   - Tambah upload manifest_dump.xml + repo_list.txt sebagai diagnostic artifact
-#   - Verify step kasih pesan error yang jelas + instruksi
+# Perubahan v9 vs v8:
+#   - Ganti -g default,-pdk,... menjadi -g all,-notdefault,-pdk,... 
+#     (default terlalu agresif di android16-qpr2-release: hanya 22 project
+#      ke-include, hardware/interfaces missing). 
+#     "all"  = match SEMUA project terlepas group apa
+#     "-notdefault" = exclude project yang explicit notdefault (langka)
+#   - Pre-sync validation sekarang juga retry dengan re-init tanpa -g kalau
+#     hardware/interfaces masih missing (auto-fallback)
+#   - Local manifest tambah remove untuk Chromium/LLVM/Fuchsia SDK (size cap)
 # ============================================================================
 
 on:
@@ -150,56 +153,100 @@ jobs:
           HOME=/mnt/aosp/home git config --global color.ui false
           HOME=/mnt/aosp/home git config --global pack.threads 2
 
-      # ---------- Step 5: Repo init dengan group filter ----------
-      - name: Repo init
+      # ---------- Step 5: Repo init (v9: -g all bukan -g default) ----------
+      - name: Repo init (with -g all,-notdefault,-pdk,...)
         working-directory: /mnt/aosp
         run: |
+          # v9 KEY FIX: pakai "all" bukan "default".
+          # "all" = match SEMUA project apapun groupnya.
+          # "default" = hanya match project yang explicitly tagged groups="default"
+          #             (di android16-qpr2-release ini cuma ~22 project, missing
+          #              platform/hardware/interfaces).
+          # "-notdefault" = exclude project yang explicit ada di group "notdefault"
+          #                 (project yang sengaja dimatikan secara default upstream)
           /mnt/aosp/bin/repo init \
             -u https://android.googlesource.com/platform/manifest \
             -b ${{ github.event.inputs.aosp_branch }} \
-            -g default,-pdk,-pdk-cw,-pdk-fs,-cts,-vts,-tests \
+            -g all,-notdefault,-pdk,-pdk-cw,-pdk-fs,-cts,-vts,-tests \
             --depth=1 --no-tags --no-clone-bundle
 
-      # ---------- Step 6: Local manifest ----------
-      - name: Apply minimal local manifest
+      # ---------- Step 6: Local manifest (v9: tambah aggressive removes) ----------
+      - name: Apply local manifest with aggressive size caps
         working-directory: /mnt/aosp
         run: |
           mkdir -p .repo/local_manifests
           cat > .repo/local_manifests/skip_safe.xml << 'EOF'
           <?xml version="1.0" encoding="UTF-8"?>
           <manifest>
+            <!-- Test suites: tidak dibutuhkan untuk build HAL module -->
             <remove-project name="platform/cts"/>
+
+            <!-- Chromium webview / browser: 5+GB, tidak relevan dengan camera HAL -->
+            <remove-project name="platform/external/chromium-webview"/>
+            <remove-project name="platform/external/cronet"/>
+
+            <!-- LLVM project source: kita pakai prebuilt clang, tidak build LLVM -->
+            <remove-project name="platform/external/llvm-project"/>
+
+            <!-- Fuchsia SDK: tidak relevan -->
+            <remove-project name="platform/prebuilts/fuchsia_sdk"/>
           </manifest>
           EOF
+          cat .repo/local_manifests/skip_safe.xml
 
-      # ---------- Step 6b (NEW v8): Pre-sync manifest validation ----------
-      # Tujuan: konfirmasi platform/hardware/interfaces ADA di manifest setelah
-      # group filter diterapkan. Kalau tidak ada di sini, root cause = hipotesis #1.
-      - name: Pre-sync manifest validation
+      # ---------- Step 6b: Pre-sync manifest validation (v9: dengan auto-fallback) ----------
+      - name: Pre-sync manifest validation (with auto-fallback)
         working-directory: /mnt/aosp
         run: |
           mkdir -p /mnt/aosp/logs
-          echo "=== Dump manifest (tanpa -r, karena project belum ke-sync) ==="
-          # PENTING: JANGAN pakai -r di sini. -r minta git rev-parse HEAD di tiap
-          # project folder, padahal sync belum jalan -> FileNotFoundError.
-          /mnt/aosp/bin/repo manifest -o /mnt/aosp/logs/manifest_dump.xml
-          echo "manifest_dump.xml size: $(stat -c%s /mnt/aosp/logs/manifest_dump.xml) bytes"
-          echo ""
-          echo "=== Cek apakah platform/hardware/interfaces ada di manifest ==="
-          if grep -q 'name="platform/hardware/interfaces"' /mnt/aosp/logs/manifest_dump.xml; then
-            echo "OK: platform/hardware/interfaces TERMASUK dalam manifest setelah filter"
-            grep -A1 'name="platform/hardware/interfaces"' /mnt/aosp/logs/manifest_dump.xml | head -10
-          else
-            echo "FATAL: platform/hardware/interfaces TIDAK ADA di manifest!"
-            echo "=> Group filter terlalu agresif. Cek hipotesis #1."
+
+          validate_manifest() {
+            local label="$1"
+            local outfile="$2"
+            echo "=== Dump manifest [$label] ==="
+            /mnt/aosp/bin/repo manifest -o "$outfile"
+            local size=$(stat -c%s "$outfile")
+            echo "$outfile size: ${size} bytes"
             echo ""
-            echo "=== Project apa saja yang ada di manifest (sample) ==="
-            grep -oE 'name="[^"]+"' /mnt/aosp/logs/manifest_dump.xml | head -50
-            exit 1
+            echo "=== Cek apakah platform/hardware/interfaces ada di manifest [$label] ==="
+            if grep -q 'name="platform/hardware/interfaces"' "$outfile"; then
+              echo "OK [$label]: platform/hardware/interfaces TERMASUK"
+              return 0
+            else
+              echo "FAIL [$label]: platform/hardware/interfaces TIDAK ADA"
+              return 1
+            fi
+          }
+
+          # Coba 1: dengan -g all,-notdefault,-pdk,... (config v9 default)
+          if validate_manifest "v9-all-filter" /mnt/aosp/logs/manifest_dump.xml; then
+            echo "=== Validation PASSED dengan group filter v9 ==="
+          else
+            echo ""
+            echo "=== Group filter v9 masih memotong hardware/interfaces ==="
+            echo "=== Auto-fallback: re-init tanpa -g filter sama sekali ==="
+            /mnt/aosp/bin/repo init \
+              -u https://android.googlesource.com/platform/manifest \
+              -b ${{ github.event.inputs.aosp_branch }} \
+              --depth=1 --no-tags --no-clone-bundle
+            if validate_manifest "v9-fallback-no-filter" /mnt/aosp/logs/manifest_dump.xml; then
+              echo "=== Fallback PASSED tanpa group filter ==="
+              echo "PERINGATAN: tanpa filter, sync akan lebih besar ~30-50GB extra"
+            else
+              echo ""
+              echo "=== FATAL: bahkan tanpa filter, hardware/interfaces tidak ada ==="
+              echo "=== List semua project (sample 100) ==="
+              grep -oE 'name="[^"]+"' /mnt/aosp/logs/manifest_dump.xml | head -100
+              exit 1
+            fi
           fi
+
           echo ""
-          echo "=== List semua project hardware/* di manifest ==="
-          grep -oE 'name="platform/hardware/[^"]+"' /mnt/aosp/logs/manifest_dump.xml | sort -u
+          echo "=== List semua project hardware/* di manifest final ==="
+          grep -oE 'name="platform/hardware/[^"]+"' /mnt/aosp/logs/manifest_dump.xml | sort -u | head -50
+          echo ""
+          echo "=== Total project di manifest ==="
+          grep -c '<project ' /mnt/aosp/logs/manifest_dump.xml || true
 
       # ---------- Step 7a: Memory monitor ----------
       - name: Start memory monitor
@@ -211,7 +258,7 @@ jobs:
            done) &
           echo $! > /mnt/aosp/logs/monitor.pid
 
-      # ---------- Step 7b: Repo sync (v8: tambah --fail-fast) ----------
+      # ---------- Step 7b: Repo sync (--fail-fast) ----------
       - name: Repo sync (with retry & fail-fast)
         working-directory: /mnt/aosp
         run: |
@@ -225,7 +272,6 @@ jobs:
             if [ "$FREE_AOSP_GB" -lt 50 ]; then
               echo "WARNING: Free space < 50G, sync mungkin gagal"
             fi
-            # v8: --fail-fast biar partial-fail langsung exit nonzero (root cause hipotesis #2)
             /mnt/aosp/bin/repo sync \
               -c -j2 --force-sync --no-clone-bundle \
               --no-tags --optimized-fetch --fail-fast
@@ -257,8 +303,6 @@ jobs:
         run: df -h
 
       # ---------- Step 8: Post-sync cleanup ----------
-      # Note v8: HAPUS test/vts dari list cleanup karena hardware/interfaces TIDAK
-      # masuk test/vts. Tapi pertahankan kalau ada folder yang aman dihapus.
       - name: Post-sync cleanup (safe targets only)
         working-directory: /mnt/aosp
         run: |
@@ -271,13 +315,11 @@ jobs:
             prebuilts/fuchsia_sdk developers docs ; do
             [ -e "$d" ] && rm -rf "$d" && echo "Removed $d"
           done
-          # SENGAJA TIDAK HAPUS: test/* karena bisa overlap dengan project apapun
-          # SENGAJA TIDAK HAPUS: cts/ karena sudah di-skip via local_manifest
           echo "=== Setelah cleanup ==="
           du -sh . 2>/dev/null | tail -1
           df -h /mnt/aosp
 
-      # ---------- Step 8b (NEW v8): Diagnose hardware tree ----------
+      # ---------- Step 8b: Diagnose hardware tree ----------
       - name: Diagnose hardware tree (BEFORE Verify)
         working-directory: /mnt/aosp
         run: |
@@ -352,7 +394,7 @@ jobs:
           echo " END DIAGNOSTIC"
           echo "============================================================"
 
-      # ---------- Step 8c (NEW v8): Auto-recover hardware/interfaces kalau missing ----------
+      # ---------- Step 8c: Auto-recover hardware/interfaces kalau missing ----------
       - name: Auto-recover hardware/interfaces (if missing)
         working-directory: /mnt/aosp
         run: |
@@ -370,8 +412,7 @@ jobs:
             echo "=== Folder target ADA, skip auto-recovery ==="
           fi
 
-      # ---------- Step 8d (NEW v8): Upload diagnostic artifacts SEBELUM verify ----------
-      # Penting: upload diagnostic dulu biar kalau Verify fail, user tetap bisa lihat
+      # ---------- Step 8d: Upload diagnostic artifacts SEBELUM verify ----------
       - name: Upload diagnostic artifacts (pre-verify)
         if: always()
         uses: actions/upload-artifact@v4
@@ -385,7 +426,7 @@ jobs:
           retention-days: 14
           if-no-files-found: warn
 
-      # ---------- Step 8e: Verify (dengan pesan error yang clear) ----------
+      # ---------- Step 8e: Verify ----------
       - name: Verify external camera HAL source
         working-directory: /mnt/aosp
         run: |
