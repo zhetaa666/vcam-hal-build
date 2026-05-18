@@ -1,19 +1,29 @@
-name: Build External Camera HAL (AIDL V1) — v9.2
+name: Build External Camera HAL (AIDL V1) — v9.3
 
 # ============================================================================
-# Phase 4A v9.2 — VCam Project (Santuyajah)
+# Phase 4A v9.3 — VCam Project (Santuyajah)
 # Target: android.hardware.camera.provider-V1-external-service (arm64)
 # Plus:   android.hardware.camera.provider-V1-external-impl.so
 #         camera.device-external-impl.so
 #
+# Perubahan v9.3 vs v9.2:
+#   - v9.1 sync GAGAL di attempt 1 dengan "No space left on device":
+#       /dev/mapper/buildvg-buildlv  101G  101G  12K 100% /mnt/aosp
+#     Tanpa -g filter, sync 1010 project = ~99GB. Masih perlu 50GB
+#     untuk build output + 8GB ccache + temp = total ~157GB.
+#     GHA runner max 101GB -> kurang 56GB.
+#   - Solusi v9.3: aggressive prune via local_manifest dengan
+#     optional="true" (sudah terbukti aman di v9.1).
+#     Target prune: ~60GB project yang pasti tidak dipakai camera HAL
+#     (rust toolchain, VNDK legacy, llvm source, chromium, dll).
+#   - JANGAN HAPUS: system/core, system/libhidl, system/libfmq,
+#     frameworks/av, frameworks/native, hardware/libhardware,
+#     external/jpeg-turbo, external/libyuv, external/tinyxml2,
+#     bionic, prebuilts/clang, build/* (camera HAL deps)
+#
 # Perubahan v9.2 vs v9.1:
-#   - v9.1 auto-fallback BERHASIL: tanpa -g filter dapat 1010 project (vs
-#     22 project dengan -g all,-notdefault,-pdk,...). Kesimpulan: di branch
-#     android16-qpr2-release, sistem group sudah berbeda total dari AOSP
-#     versi lama. Bahkan tag "all" tidak match ke ~99% project.
-#   - Solusi: buang -g filter sama sekali sebagai default (tidak perlu
-#     auto-fallback path). Validation step jadi single-shot, lebih cepat.
-#   - Aggressive post-sync cleanup tetap ada untuk imbangi sync lebih besar.
+#   - Skip -g filter sebagai default (terbukti perlu di android16)
+#   - Validation step single-shot
 #
 # Perubahan v9.1 vs v9:
 #   - Fix local_manifest non-existent project crash (optional="true")
@@ -173,28 +183,117 @@ jobs:
             -b ${{ github.event.inputs.aosp_branch }} \
             --depth=1 --no-tags --no-clone-bundle
 
-      # ---------- Step 6: Local manifest (v9.1: minimal + optional="true") ----------
-      # v9.1 FIX: di v9 saya pakai remove-project untuk project yang
-      # ternyata tidak ada di manifest android16-qpr2-release (cth:
-      # platform/external/llvm-project sudah pindah). Itu bikin SELURUH
-      # parse manifest fatal -> output 0 byte.
-      # Solusi: pakai optional="true" supaya remove-project tidak fatal
-      # kalau project tidak ada. Plus drop project yang tidak yakin ada.
-      # Size cap nanti via rm -rf POST-sync, bukan via local_manifest.
-      - name: Apply minimal local manifest
+      # ---------- Step 6: Local manifest (v9.3: AGGRESSIVE prune ~60GB) ----------
+      # v9.3 KEY FIX:
+      #   v9.1 sync gagal: "No space left on device" di /mnt/aosp (101G full)
+      #   Tanpa -g filter, sync ~99GB. Build perlu 50GB + ccache 8GB = total ~157GB.
+      #   GHA max 101GB -> kurang ~56GB. Harus prune ~60GB di sync time.
+      # 
+      # Strategy: pakai optional="true" (terbukti aman di v9.1) untuk SEMUA
+      # remove. Kalau project tidak ada di manifest, repo skip diam-diam.
+      # 
+      # JANGAN PRUNE (deps camera HAL — confirmed dari Android.bp):
+      #   - system/core, system/libhidl, system/libfmq, system/libbase
+      #   - frameworks/av, frameworks/native (CameraMetadata, gralloc)
+      #   - hardware/libhardware (gralloc HAL header)
+      #   - hardware/interfaces (TARGET kita!)
+      #   - external/jpeg-turbo, external/libyuv, external/tinyxml2,
+      #     external/libexif, external/expat
+      #   - bionic, prebuilts/clang, prebuilts/build-tools, build/*
+      #   - kernel/configs (untuk vintf check)
+      - name: Apply aggressive prune local manifest
         working-directory: /mnt/aosp
         run: |
           mkdir -p .repo/local_manifests
           cat > .repo/local_manifests/skip_safe.xml << 'EOF'
           <?xml version="1.0" encoding="UTF-8"?>
           <manifest>
-            <!-- platform/cts confirmed exist (v7 sync sukses dengan ini) -->
+            <!-- ===== TIER 1: Test suites (~5GB) — confirmed v7 sukses ===== -->
             <remove-project name="platform/cts" optional="true"/>
+            <remove-project name="platform/test/cts-root" optional="true"/>
+            <remove-project name="platform/test/mts" optional="true"/>
+            <remove-project name="platform/test/graphics" optional="true"/>
+            <remove-project name="platform/test/vts" optional="true"/>
+            <remove-project name="platform/test/vts-testcase" optional="true"/>
+            <remove-project name="platform/test/dittosuite" optional="true"/>
+            <remove-project name="platform/test/app_compat" optional="true"/>
+            <remove-project name="platform/test/suite_harness" optional="true"/>
+
+            <!-- ===== TIER 2: Toolchain source / alternative langs (~14GB) ===== -->
+            <!-- Kita pakai PREBUILT clang, jadi LLVM/Rust/V8 SOURCE tidak perlu -->
+            <remove-project name="platform/external/llvm-project" optional="true"/>
+            <remove-project name="platform/external/llvm" optional="true"/>
+            <remove-project name="platform/external/clang" optional="true"/>
+            <remove-project name="platform/external/lldb-llvm" optional="true"/>
+            <remove-project name="platform/prebuilts/rust" optional="true"/>
+            <remove-project name="platform/prebuilts/v8" optional="true"/>
+            <remove-project name="platform/external/v8" optional="true"/>
+            <remove-project name="platform/external/swift" optional="true"/>
+            <remove-project name="platform/external/dart" optional="true"/>
+
+            <!-- ===== TIER 3: VNDK legacy (~15GB) — Android 16 sudah deprecate VNDK ===== -->
+            <remove-project name="platform/prebuilts/vndk/v30" optional="true"/>
+            <remove-project name="platform/prebuilts/vndk/v31" optional="true"/>
+            <remove-project name="platform/prebuilts/vndk/v32" optional="true"/>
+            <remove-project name="platform/prebuilts/vndk/v33" optional="true"/>
+            <remove-project name="platform/prebuilts/vndk/v34" optional="true"/>
+            <remove-project name="platform/prebuilts/vndk/v35" optional="true"/>
+            <remove-project name="platform/prebuilts/abi-dumps" optional="true"/>
+            <remove-project name="platform/prebuilts/abi-dumps/ndk" optional="true"/>
+            <remove-project name="platform/prebuilts/abi-dumps/platform" optional="true"/>
+            <remove-project name="platform/prebuilts/abi-dumps/vndk" optional="true"/>
+
+            <!-- ===== TIER 4: Browser & web (~7GB) — irrelevant untuk HAL ===== -->
+            <remove-project name="platform/external/chromium-webview" optional="true"/>
+            <remove-project name="platform/external/chromium-libpac" optional="true"/>
+            <remove-project name="platform/external/cronet" optional="true"/>
+
+            <!-- ===== TIER 5: Build/SDK extras (~8GB) ===== -->
+            <remove-project name="platform/prebuilts/fuchsia_sdk" optional="true"/>
+            <remove-project name="platform/prebuilts/qemu-kernel" optional="true"/>
+            <remove-project name="platform/prebuilts/maven_repo/android" optional="true"/>
+            <remove-project name="platform/prebuilts/maven_repo/bumblebee" optional="true"/>
+            <remove-project name="platform/prebuilts/cmake" optional="true"/>
+            <remove-project name="platform/prebuilts/cmake-linux" optional="true"/>
+            <remove-project name="platform/prebuilts/cmake-darwin" optional="true"/>
+            <remove-project name="platform/prebuilts/ndk" optional="true"/>
+            <remove-project name="platform/prebuilts/sdk" optional="true"/>
+            <remove-project name="platform/prebuilts/runtime" optional="true"/>
+            <remove-project name="platform/prebuilts/asuite" optional="true"/>
+
+            <!-- ===== TIER 6: Apps tidak relevan (~5GB) ===== -->
+            <remove-project name="platform/packages/apps/Chrome" optional="true"/>
+            <remove-project name="platform/packages/apps/Browser2" optional="true"/>
+            <remove-project name="platform/packages/apps/Bluetooth" optional="true"/>
+            <remove-project name="platform/packages/apps/EmergencyInfo" optional="true"/>
+            <remove-project name="platform/packages/apps/Gallery2" optional="true"/>
+            <remove-project name="platform/packages/apps/Music" optional="true"/>
+            <remove-project name="platform/packages/apps/Calendar" optional="true"/>
+            <remove-project name="platform/packages/apps/DeskClock" optional="true"/>
+            <remove-project name="platform/packages/apps/Email" optional="true"/>
+            <remove-project name="platform/packages/apps/Messaging" optional="true"/>
+
+            <!-- ===== TIER 7: Misc (~6GB) ===== -->
+            <remove-project name="platform/developers/build" optional="true"/>
+            <remove-project name="platform/developers/demos" optional="true"/>
+            <remove-project name="platform/developers/samples" optional="true"/>
+            <remove-project name="platform/developers/docs" optional="true"/>
+            <remove-project name="platform/developers/samples/android" optional="true"/>
+            <remove-project name="platform/docs/source.android.com" optional="true"/>
+            <remove-project name="platform/external/perfetto" optional="true"/>
+            <remove-project name="platform/external/skia" optional="true"/>
+            <remove-project name="platform/external/skqp" optional="true"/>
+            <remove-project name="platform/frameworks/wilhelm" optional="true"/>
+            <remove-project name="platform/frameworks/opt/photoviewer" optional="true"/>
           </manifest>
           EOF
+          echo "=== Local manifest content ==="
           cat .repo/local_manifests/skip_safe.xml
+          echo ""
+          echo "=== Total remove-project entries ==="
+          grep -c '<remove-project' .repo/local_manifests/skip_safe.xml
 
-      # ---------- Step 6b: Pre-sync manifest validation (v9.2: single-shot) ----------
+      # ---------- Step 6b: Pre-sync manifest validation (v9.3: cek prune efektif) ----------
       - name: Pre-sync manifest validation
         working-directory: /mnt/aosp
         run: |
@@ -206,7 +305,7 @@ jobs:
           
           if [ "$SIZE" -lt 50000 ]; then
             echo "WARNING: manifest size suspiciously small (${SIZE} bytes)"
-            echo "Expected: ~99000+ bytes for android16-qpr2-release without -g filter"
+            echo "Expected: ~80000-99000 bytes after prune"
           fi
           
           echo ""
@@ -215,11 +314,34 @@ jobs:
             echo "OK: platform/hardware/interfaces TERMASUK"
           else
             echo "FATAL: platform/hardware/interfaces TIDAK ADA"
-            echo ""
             echo "=== List semua project (sample 100) ==="
             grep -oE 'name="[^"]+"' /mnt/aosp/logs/manifest_dump.xml | head -100
             exit 1
           fi
+          
+          echo ""
+          echo "=== Verifikasi project KRITIS (deps camera HAL) masih ADA ==="
+          CRITICAL_DEPS="platform/system/core platform/system/libhidl platform/system/libfmq platform/system/libbase platform/frameworks/av platform/frameworks/native platform/hardware/libhardware platform/external/jpeg-turbo platform/external/libyuv platform/external/tinyxml2 platform/bionic platform/build platform/build_bazel"
+          MISSING_CRITICAL=0
+          for dep in $CRITICAL_DEPS; do
+            if grep -q "name=\"$dep\"" /mnt/aosp/logs/manifest_dump.xml; then
+              echo "  OK: $dep"
+            else
+              echo "  WARN: $dep TIDAK ADA (mungkin di-rename, akan cek post-sync)"
+              MISSING_CRITICAL=$((MISSING_CRITICAL+1))
+            fi
+          done
+          
+          echo ""
+          echo "=== Verifikasi project yang HARUS DI-PRUNE benar-benar ter-prune ==="
+          PRUNED_TARGETS="platform/prebuilts/rust platform/external/llvm-project platform/external/chromium-webview platform/prebuilts/vndk/v34"
+          for tgt in $PRUNED_TARGETS; do
+            if grep -q "name=\"$tgt\"" /mnt/aosp/logs/manifest_dump.xml; then
+              echo "  WARN: $tgt MASIH ADA (prune tidak match nama project)"
+            else
+              echo "  OK: $tgt PRUNED"
+            fi
+          done
           
           echo ""
           echo "=== List semua project hardware/* di manifest ==="
@@ -230,10 +352,14 @@ jobs:
           PROJ_COUNT=$(grep -c '<project ' /mnt/aosp/logs/manifest_dump.xml || echo 0)
           echo "Total: $PROJ_COUNT projects"
           if [ "$PROJ_COUNT" -lt 100 ]; then
-            echo "FATAL: project count terlalu sedikit ($PROJ_COUNT). Expected: ~1000+"
+            echo "FATAL: project count terlalu sedikit ($PROJ_COUNT). Expected: ~900+"
             exit 1
           fi
-          echo "PASSED: project count OK"
+          if [ "$PROJ_COUNT" -gt 1100 ]; then
+            echo "WARN: project count > 1100 ($PROJ_COUNT). Prune mungkin tidak efektif."
+            echo "      Expected setelah prune ~60GB: ~900-960 projects."
+          fi
+          echo "PASSED: manifest validation OK"
 
       # ---------- Step 7a: Memory monitor ----------
       - name: Start memory monitor
