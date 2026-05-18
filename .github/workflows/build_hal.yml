@@ -352,12 +352,22 @@ jobs:
           
           echo ""
           echo "=== Verifikasi project yang HARUS DI-PRUNE benar-benar ter-prune ==="
-          PRUNED_TARGETS="platform/prebuilts/rust platform/external/llvm-project platform/external/chromium-webview platform/prebuilts/vndk/v34"
+          PRUNED_TARGETS="platform/prebuilts/rust platform/external/llvm-project platform/external/chromium-webview platform/prebuilts/abi-dumps platform/prebuilts/clang-darwin"
           for tgt in $PRUNED_TARGETS; do
             if grep -q "name=\"$tgt\"" /mnt/aosp/logs/manifest_dump.xml; then
               echo "  WARN: $tgt MASIH ADA (prune tidak match nama project)"
             else
               echo "  OK: $tgt PRUNED"
+            fi
+          done
+
+          echo ""
+          echo "=== Verifikasi VNDK v30-v35 SEMUANYA dipertahankan (v9.5 fix) ==="
+          for v in 30 31 32 33 34 35; do
+            if grep -q "name=\"platform/prebuilts/vndk/v${v}\"" /mnt/aosp/logs/manifest_dump.xml; then
+              echo "  OK: vndk/v${v} TERMASUK"
+            else
+              echo "  WARN: vndk/v${v} TIDAK ADA (mungkin di-rename, akan cek post-sync)"
             fi
           done
           
