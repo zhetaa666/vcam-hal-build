@@ -1,21 +1,28 @@
-name: Build External Camera HAL (AIDL V1) v9.9
+name: Build External Camera HAL (AIDL V1) v9.10
 
 # ============================================================================
-# Phase 4A v9.9 — VCam Project (Santuyajah)
+# Phase 4A v9.10 — VCam Project (Santuyajah)
 # Target: android.hardware.camera.provider-V1-external-service (arm64)
 #
-# Perubahan v9.9 vs v9.8:
-#   - Error baru di v9.8: framework-connectivity-test-defaults / 
-#     framework-connectivity-internal-test-defaults UNDEFINED
-#   - Penyebab: Android.bp di tests/ Connectivity & telephony me-reuse
-#     defaults yg ke-strip oleh group filter (tapi mereka sendiri
-#     belum kena scrubber karena pattern matching belum cover).
-#   - Fix v9.9:
-#       (a) TIER 0: Preemptive nuke folder tests/ DULUAN sebelum
-#           scrubber loop (lebih reliable dari pattern matching).
-#       (b) Tambah `framework-connectivity-*-defaults` ke PATTERNS scrubber
-#           sebagai jaring ke-2.
-#       (c) Tambah `ALLOW_MISSING_DEPENDENCIES=true` env (Soong toleransi).
+# Perubahan v9.10 vs v9.9:
+#   - Error baru di v9.9: librenderengine_deps UNDEFINED di
+#       frameworks/native/services/surfaceflinger/Android.bp:44 (file UTAMA)
+#       hardware/interfaces/graphics/composer/2.2/utils/vts/Android.bp
+#       frameworks/native/services/surfaceflinger/tests/unittests/Android.bp
+#   - Penyebab: scrubber v9.9 over-aggressive me-rename
+#     `frameworks/native/libs/renderengine/Android.bp` (yang berisi module
+#     `librenderengine_deps`) hanya karena di sana ada pattern testing.
+#     Akibatnya modul utama yang dipakai surfaceflinger ikut hilang.
+#   - Fix v9.10:
+#       (a) RESTORE: balikkan dulu *.bp.disabled di folder kritis
+#           (frameworks/native/libs, frameworks/av, hardware/interfaces,
+#           system, external/jpeg-turbo, dll) sebelum scrubber jalan.
+#       (b) FILTER scrubber: hanya rename Android.bp yang path nya
+#           match /tests?/ atau /vts/ atau /mts/ atau /cts/ atau /sts/.
+#           Modul utama (top-level Android.bp) JANGAN di-rename.
+#       (c) ITERATION GUARD: kalau bp error di iterasi BUKAN test path,
+#           ABORT scrubber (jangan rename file modul utama).
+#       (d) TIER 0 EXPAND: tambah folder tests/vts yang error sekarang.
 # ============================================================================
 
 on:
@@ -519,7 +526,22 @@ jobs:
             frameworks/opt/net/wifi/tests \
             frameworks/base/services/tests \
             frameworks/base/core/tests \
-            frameworks/base/tests ; do
+            frameworks/base/tests \
+            frameworks/native/services/surfaceflinger/tests \
+            frameworks/native/libs/gui/tests \
+            frameworks/native/libs/renderengine/tests \
+            hardware/interfaces/graphics/composer/2.1/utils/vts \
+            hardware/interfaces/graphics/composer/2.2/utils/vts \
+            hardware/interfaces/graphics/composer/2.3/utils/vts \
+            hardware/interfaces/graphics/composer/2.4/utils/vts \
+            hardware/interfaces/graphics/composer/aidl/vts \
+            hardware/interfaces/graphics/mapper/2.0/utils/vts \
+            hardware/interfaces/graphics/mapper/2.1/utils/vts \
+            hardware/interfaces/graphics/mapper/3.0/utils/vts \
+            hardware/interfaces/graphics/mapper/4.0/utils/vts \
+            hardware/interfaces/graphics/allocator/2.0/utils/vts \
+            hardware/interfaces/graphics/allocator/3.0/utils/vts \
+            hardware/interfaces/graphics/allocator/4.0/utils/vts ; do
             if [ -d "$d" ]; then
               SIZE=$(du -sh "$d" 2>/dev/null | cut -f1)
               rm -rf "$d" && echo "  RM: $d (was $SIZE)"
@@ -534,120 +556,209 @@ jobs:
           grep -rl 'framework-connectivity-internal-test-defaults\|framework-connectivity-test-defaults' \
             --include='Android.bp' . 2>/dev/null | head -20 || echo "  (kosong = bagus)"
 
-      # ---------- Step 8a (v9.8/v9.9): Iterative broken-bp scrubber ----------
-      # Strategi:
-      #   v9.7 pakai PATTERNS list statis -> tidak cover semua simbol broken
-      #   (compatibility_test_suite_package, test_suite_package, dll).
-      #
-      # v9.8 pendekatan ITERATIF self-healing:
-      #   1. Initial pass: rename Android.bp dengan PATTERNS yang kita tahu
-      #   2. Loop sampai max 10 iterasi:
-      #      a. Coba soong bootstrap (cuma untuk capture errors, tidak full build)
-      #      b. Parse error message untuk file path Android.bp
-      #      c. Rename semua file yang error ke .bp.disabled
-      #      d. Ulangi sampai bootstrap pass atau max iterasi
-      #   3. Camera HAL Android.bp eksplisit DI-LINDUNGI dari rename
-      #
-      # v9.9 tambahan: tambah pattern `framework-connectivity-test-defaults`
-      # ke initial PATTERNS list (kebetulan sebagian besar sudah ke-nuke
-      # di TIER 0 di atas, tapi pattern ini sebagai jaring ke-2).
-      - name: Iterative broken-bp scrubber (v9.9)
+      # ---------- Step 8a-RESTORE (v9.10): Pulihkan Android.bp.disabled di folder kritis ----------
+      # Antisipasi: kalau v9.9 sebelumnya jalan, mungkin ada Android.bp yg
+      # bukan test ikut ke-rename. Restore dulu sebelum scrubber.
+      # (Untuk run fresh ini no-op, tapi safety net kalau retry pakai cache.)
+      - name: Restore broken Android.bp.disabled di folder kritis (v9.10)
         working-directory: /mnt/aosp
         run: |
-          # ===== Initial pass: rename Android.bp dengan pattern yang kita tahu =====
+          echo "=== Restore Android.bp.disabled di folder DEPS camera HAL ==="
+          # Folder yg DI-PERLUKAN untuk build camera external HAL — JANGAN sentuh:
+          KRITIS=(
+            "frameworks/native/libs"
+            "frameworks/native/services/surfaceflinger"
+            "frameworks/av/camera"
+            "frameworks/av/services/camera"
+            "frameworks/av/media/libstagefright/foundation"
+            "hardware/interfaces/camera"
+            "hardware/interfaces/graphics/composer"
+            "hardware/interfaces/graphics/mapper"
+            "hardware/interfaces/graphics/allocator"
+            "hardware/interfaces/graphics/common"
+            "hardware/libhardware"
+            "system/core"
+            "system/libhidl"
+            "system/libfmq"
+            "system/libbase"
+            "system/security"
+            "external/jpeg-turbo"
+            "external/libyuv"
+            "external/tinyxml2"
+            "external/libexif"
+            "external/expat"
+            "bionic"
+            "build"
+          )
+          RESTORED=0
+          for base in "${KRITIS[@]}"; do
+            if [ -d "$base" ]; then
+              # Hanya restore yg BUKAN di subfolder tests/vts/cts/mts/sts
+              while IFS= read -r f; do
+                # Jangan restore kalau path mengandung /tests?/, /vts/, /mts/, /cts/, /sts/
+                if echo "$f" | grep -qE '/tests?/|/vts/|/mts/|/cts/|/sts/|/benchmarks?/'; then
+                  continue
+                fi
+                ORIG="${f%.disabled}"
+                mv "$f" "$ORIG" && RESTORED=$((RESTORED+1))
+              done < <(find "$base" -name "Android.bp.disabled" 2>/dev/null)
+            fi
+          done
+          echo "Restored $RESTORED Android.bp di folder kritis (non-test)"
+
+      # ---------- Step 8a (v9.10): Iterative broken-bp scrubber dengan FILTER KETAT ----------
+      # v9.10 KEY CHANGE:
+      #   - Hanya rename Android.bp yang path-nya match REGEX TEST_PATHS
+      #     (mengandung /tests?/, /vts/, /mts/, /cts/, /sts/, /benchmarks?/)
+      #   - Modul utama (top-level Android.bp di frameworks/native/libs/...,
+      #     frameworks/native/services/..., hardware/interfaces/camera/, dll)
+      #     JANGAN PERNAH di-rename, walau ada dependency error.
+      #   - Kalau bootstrap masih error tapi error file BUKAN test path,
+      #     scrubber STOP & laporkan ke log (build pasti gagal, biar diagnostik
+      #     manual saja, jangan auto-disable file modul utama).
+      - name: Iterative broken-bp scrubber STRICT (v9.10)
+        working-directory: /mnt/aosp
+        run: |
+          # Regex untuk path TEST/VTS/etc — boleh di-rename
+          TEST_PATH_REGEX='/tests?/|/vts/|/mts/|/cts/|/sts/|/benchmarks?/|/fuzz(er)?s?/|/perftests?/'
+
+          # Helper: cek apakah file path adalah test path (bisa di-rename)
+          is_test_path() {
+            echo "$1" | grep -qE "$TEST_PATH_REGEX"
+          }
+
+          # Helper: cek apakah file path harus DI-LINDUNGI (modul kritis)
+          is_protected() {
+            echo "$1" | grep -qE 'hardware/interfaces/camera/(provider|device|common)/(default|[0-9])|hardware/libhardware/include/hardware/camera|frameworks/native/libs/(renderengine|gui|ui|nativewindow|sync)/Android\.bp$|frameworks/native/services/surfaceflinger/Android\.bp$|frameworks/av/camera/Android\.bp$'
+          }
+
           echo "=========================================================="
-          echo " PHASE 1: Initial strip via known PATTERNS"
+          echo " PHASE 1 (v9.10): Initial strip via PATTERNS — TEST PATH ONLY"
           echo "=========================================================="
-          # Expanded pattern: cover semua *_defaults dan *_test_suite_package
-          PATTERNS='"cts_defaults"|"mts_defaults"|"vts_defaults"|"sts_defaults"|"rs_defaults"|"mts-target-sdk-version-current"|"llvm_tblgen"|"cts-tradefed"|"vts-tradefed"|"mts-tradefed"|"compatibility_test_suite_package"|"test_suite_package"|"csuite-tradefed"|"catbox-tradefed"|"framework-connectivity-test-defaults"|"framework-connectivity-internal-test-defaults"|"framework-connectivity-t-defaults"'
+          PATTERNS='"cts_defaults"|"mts_defaults"|"vts_defaults"|"sts_defaults"|"rs_defaults"|"mts-target-sdk-version-current"|"cts-tradefed"|"vts-tradefed"|"mts-tradefed"|"compatibility_test_suite_package"|"test_suite_package"|"csuite-tradefed"|"catbox-tradefed"|"framework-connectivity-test-defaults"|"framework-connectivity-internal-test-defaults"|"framework-connectivity-t-defaults"|"llvm_tblgen"'
 
           BROKEN_FILES=$(grep -rlE "$PATTERNS" --include="Android.bp" \
             --exclude-dir=".repo" \
-            --exclude-dir="hardware/interfaces/camera" \
             . 2>/dev/null || true)
 
           INITIAL_COUNT=0
+          SKIPPED_NON_TEST=0
           for f in $BROKEN_FILES; do
-            if echo "$f" | grep -qE "hardware/interfaces/camera|hardware/libhardware/include/hardware/camera"; then
+            if is_protected "$f"; then
+              continue
+            fi
+            if ! is_test_path "$f"; then
+              # File punya pattern tapi BUKAN di test path -> SKIP, jangan rename
+              SKIPPED_NON_TEST=$((SKIPPED_NON_TEST+1))
               continue
             fi
             mv "$f" "${f}.disabled"
             INITIAL_COUNT=$((INITIAL_COUNT+1))
           done
-          echo "Initial pass: $INITIAL_COUNT Android.bp di-disabled"
+          echo "Initial pass: $INITIAL_COUNT Android.bp di-disabled (test path saja)"
+          echo "Skipped (non-test path, walau match pattern): $SKIPPED_NON_TEST"
 
-          # ===== Iterative phase: try bootstrap, parse errors, rename, retry =====
           echo ""
           echo "=========================================================="
-          echo " PHASE 2: Iterative bootstrap-and-fix"
+          echo " PHASE 2 (v9.10): Iterative bootstrap-and-fix — STRICT"
           echo "=========================================================="
           source build/envsetup.sh
           lunch ${{ github.event.inputs.build_variant }}
           export USE_CCACHE=0
+          export ALLOW_MISSING_DEPENDENCIES=true
 
-          MAX_ITER=10
+          MAX_ITER=8
+          ABORT_REASON=""
           for iter in $(seq 1 $MAX_ITER); do
             echo ""
             echo ">>>>> Iteration $iter / $MAX_ITER <<<<<"
 
-            # Coba bootstrap (cuma sampai analyzing, kita capture error)
             ERR_LOG=/mnt/aosp/logs/bootstrap_err_${iter}.log
             mkdir -p /mnt/aosp/logs
 
-            # Run soong analysis only (tidak compile)
-            # m nothing = jalankan soong bootstrap saja, tanpa build apapun
             timeout 600 m nothing 2>&1 | tee "$ERR_LOG" | tail -100 || true
 
-            # Parse error untuk dapat list Android.bp yang error
-            # Format: "error: path/to/Android.bp:NN:1: ..."
             BAD_BP=$(grep -oE 'error:\s+([a-zA-Z0-9_/.-]+/Android\.bp):' "$ERR_LOG" | \
                      sed -E 's/error:\s+//;s/:$//' | sort -u || true)
 
             if [ -z "$BAD_BP" ]; then
-              # Cek juga apakah bootstrap sukses
               if grep -q "soong bootstrap failed" "$ERR_LOG"; then
-                echo "Bootstrap masih fail tapi tidak ada error Android.bp yang bisa di-strip."
-                echo "=== Tail of bootstrap_err_${iter}.log ==="
+                echo "Bootstrap masih fail tapi tidak ada error Android.bp."
+                ABORT_REASON="bootstrap_fail_no_bp_error"
                 tail -50 "$ERR_LOG"
                 break
               fi
-              echo "✓ Bootstrap PASS — tidak ada Android.bp yang error lagi!"
+              echo "✓ Bootstrap PASS"
               break
             fi
 
-            # Rename setiap Android.bp yang error
+            # Rename hanya yg di test path & tidak protected
             BP_COUNT=0
+            FOUND_NON_TEST=0
             for bp in $BAD_BP; do
-              if [ ! -f "$bp" ]; then
+              [ ! -f "$bp" ] && continue
+
+              if is_protected "$bp"; then
+                echo "  PROTECTED (refuse to disable): $bp"
+                FOUND_NON_TEST=1
                 continue
               fi
-              # Safety check: never disable camera HAL
-              if echo "$bp" | grep -qE "hardware/interfaces/camera|hardware/libhardware/include/hardware/camera"; then
-                echo "  CRITICAL SAFETY HIT (refuse to disable): $bp"
+
+              if ! is_test_path "$bp"; then
+                # Error ada di file modul UTAMA (non-test) -> jangan disable.
+                echo "  NON-TEST PATH error (refuse to disable): $bp"
+                FOUND_NON_TEST=1
                 continue
               fi
-              echo "  Disabling: $bp"
+
+              echo "  Disabling (test path): $bp"
               mv "$bp" "${bp}.disabled"
               BP_COUNT=$((BP_COUNT+1))
             done
-            echo "Iteration $iter: disabled $BP_COUNT Android.bp"
+            echo "Iteration $iter: disabled $BP_COUNT Android.bp (test path)"
 
             if [ "$BP_COUNT" -eq 0 ]; then
-              echo "Tidak ada file baru untuk di-disable, stop iterasi."
+              if [ "$FOUND_NON_TEST" -eq 1 ]; then
+                echo "ABORT: ada error di non-test path. Tidak bisa auto-fix."
+                ABORT_REASON="non_test_error"
+                break
+              fi
+              echo "Tidak ada bp baru untuk disable, stop."
               break
             fi
           done
 
           echo ""
           echo "=========================================================="
-          echo " PHASE 3: Final verification"
+          echo " PHASE 3 (v9.10): Final verification"
           echo "=========================================================="
+          if [ -n "$ABORT_REASON" ]; then
+            echo "Scrubber STOP karena: $ABORT_REASON"
+            echo ""
+            echo "=== Last bootstrap_err tail ==="
+            ls -t /mnt/aosp/logs/bootstrap_err_*.log 2>/dev/null | head -1 | xargs tail -80 || true
+          fi
+
+          echo ""
           echo "=== Konfirmasi camera HAL Android.bp masih ada ==="
           ls -la hardware/interfaces/camera/provider/default/Android.bp
           ls -la hardware/interfaces/camera/device/default/Android.bp
           echo ""
-          echo "=== Total Android.bp.disabled yang dibuat ==="
+          echo "=== Total Android.bp.disabled yg dibuat ==="
           find . -name "Android.bp.disabled" -not -path "./.repo/*" 2>/dev/null | wc -l
+          echo ""
+          echo "=== Sanity: file kunci modul UTAMA harus tetap ada ==="
+          for f in \
+            frameworks/native/libs/renderengine/Android.bp \
+            frameworks/native/services/surfaceflinger/Android.bp \
+            frameworks/native/libs/gui/Android.bp \
+            frameworks/native/libs/ui/Android.bp ; do
+            if [ -f "$f" ]; then
+              echo "  OK: $f"
+            else
+              echo "  MISSING: $f (PROBLEM!)"
+            fi
+          done
 
       # ---------- Step 8b: Diagnose hardware tree ----------
       - name: Diagnose hardware tree (BEFORE Verify)
