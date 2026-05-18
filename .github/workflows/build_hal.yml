@@ -1,32 +1,21 @@
-name: Build External Camera HAL (AIDL V1) — v9.8
+name: Build External Camera HAL (AIDL V1) v9.9
 
 # ============================================================================
-# Phase 4A v9.8 — VCam Project (Santuyajah)
+# Phase 4A v9.9 — VCam Project (Santuyajah)
 # Target: android.hardware.camera.provider-V1-external-service (arm64)
 #
-# Perubahan v9.8 vs v9.7:
-#   - v9.7 PATTERNS list statis (cts_defaults/mts_defaults/llvm_tblgen/...)
-#     tidak cover semua. v9.7 fail dengan 3 error baru:
-#       compatibility_test_suite_package, test_suite_package
-#   - Pola: setiap kita tambah pattern, ada simbol baru yang muncul.
-#     Solusi: pendekatan ITERATIF self-healing.
-#
-# v9.8 strategi:
-#   PHASE 1: Initial strip dengan PATTERNS expanded (cover semua yang kita tahu)
-#   PHASE 2: Loop max 10x:
-#     - Run "m nothing" untuk capture error message
-#     - Parse error -> dapat list Android.bp file path
-#     - Rename file tsb ke .bp.disabled
-#     - Ulangi sampai bootstrap PASS atau tidak ada Android.bp baru untuk strip
-#   PHASE 3: Konfirmasi camera HAL Android.bp masih utuh
-#
-# Manfaat:
-#   - Self-healing: tidak perlu update PATTERNS list manual lagi
-#   - Aman: camera HAL Android.bp eksplisit di-skip dari rename
-#   - Diagnostic: setiap iterasi menyimpan error log
-#
-# Perubahan v9.7 vs v9.6:
-#   - Static PATTERNS-based scrubber (sudah dilewati v9.8 yang lebih general)
+# Perubahan v9.9 vs v9.8:
+#   - Error baru di v9.8: framework-connectivity-test-defaults / 
+#     framework-connectivity-internal-test-defaults UNDEFINED
+#   - Penyebab: Android.bp di tests/ Connectivity & telephony me-reuse
+#     defaults yg ke-strip oleh group filter (tapi mereka sendiri
+#     belum kena scrubber karena pattern matching belum cover).
+#   - Fix v9.9:
+#       (a) TIER 0: Preemptive nuke folder tests/ DULUAN sebelum
+#           scrubber loop (lebih reliable dari pattern matching).
+#       (b) Tambah `framework-connectivity-*-defaults` ke PATTERNS scrubber
+#           sebagai jaring ke-2.
+#       (c) Tambah `ALLOW_MISSING_DEPENDENCIES=true` env (Soong toleransi).
 # ============================================================================
 
 on:
@@ -501,7 +490,51 @@ jobs:
           du -sh . 2>/dev/null | tail -1
           df -h /mnt/aosp
 
-      # ---------- Step 8a (v9.8): Iterative broken-bp scrubber ----------
+      # ---------- Step 8a-PRE (v9.9): Preemptive nuke test folders ----------
+      # User error v9.8 menunjukkan: scrubber iteratif tidak segera kena
+      # `framework-connectivity-test-defaults` / `framework-connectivity-internal-test-defaults`
+      # karena error itu di-emit oleh Android.bp di subfolder TESTS yg
+      # me-reuse defaults lain. Cara paling reliable: HAPUS subfolder
+      # tests/ secara eksplisit duluan, jangan tunggu scrubber loop.
+      # Folder-folder ini TIDAK dipakai untuk build camera HAL.
+      - name: Preemptive nuke test folders (v9.9 TIER 0)
+        working-directory: /mnt/aosp
+        run: |
+          echo "=========================================================="
+          echo " TIER 0: Eksplisit nuke folder tests yang parse-fail"
+          echo "=========================================================="
+          for d in \
+            packages/modules/Connectivity/tests \
+            packages/modules/Connectivity/Tethering/tests \
+            packages/modules/Connectivity/Tethering/apex \
+            packages/modules/CaptivePortalLogin/tests \
+            packages/modules/NetworkStack/tests \
+            packages/modules/IPsec/tests \
+            packages/modules/DnsResolver/tests \
+            packages/modules/Wifi/framework/tests \
+            packages/modules/Wifi/service/tests \
+            packages/modules/Bluetooth/android/app/tests \
+            packages/modules/Bluetooth/system/blueberry \
+            frameworks/opt/telephony/tests \
+            frameworks/opt/net/wifi/tests \
+            frameworks/base/services/tests \
+            frameworks/base/core/tests \
+            frameworks/base/tests ; do
+            if [ -d "$d" ]; then
+              SIZE=$(du -sh "$d" 2>/dev/null | cut -f1)
+              rm -rf "$d" && echo "  RM: $d (was $SIZE)"
+            else
+              echo "  skip (tidak ada): $d"
+            fi
+          done
+          echo ""
+          echo "=== Sisa Android.bp yang masih reference test-defaults ==="
+          # Yang reference test-defaults bermasalah TAPI bukan camera, kita tidak peduli
+          # cuma list saja untuk visibility
+          grep -rl 'framework-connectivity-internal-test-defaults\|framework-connectivity-test-defaults' \
+            --include='Android.bp' . 2>/dev/null | head -20 || echo "  (kosong = bagus)"
+
+      # ---------- Step 8a (v9.8/v9.9): Iterative broken-bp scrubber ----------
       # Strategi:
       #   v9.7 pakai PATTERNS list statis -> tidak cover semua simbol broken
       #   (compatibility_test_suite_package, test_suite_package, dll).
@@ -514,7 +547,11 @@ jobs:
       #      c. Rename semua file yang error ke .bp.disabled
       #      d. Ulangi sampai bootstrap pass atau max iterasi
       #   3. Camera HAL Android.bp eksplisit DI-LINDUNGI dari rename
-      - name: Iterative broken-bp scrubber (v9.8)
+      #
+      # v9.9 tambahan: tambah pattern `framework-connectivity-test-defaults`
+      # ke initial PATTERNS list (kebetulan sebagian besar sudah ke-nuke
+      # di TIER 0 di atas, tapi pattern ini sebagai jaring ke-2).
+      - name: Iterative broken-bp scrubber (v9.9)
         working-directory: /mnt/aosp
         run: |
           # ===== Initial pass: rename Android.bp dengan pattern yang kita tahu =====
@@ -522,7 +559,7 @@ jobs:
           echo " PHASE 1: Initial strip via known PATTERNS"
           echo "=========================================================="
           # Expanded pattern: cover semua *_defaults dan *_test_suite_package
-          PATTERNS='"cts_defaults"|"mts_defaults"|"vts_defaults"|"sts_defaults"|"rs_defaults"|"mts-target-sdk-version-current"|"llvm_tblgen"|"cts-tradefed"|"vts-tradefed"|"mts-tradefed"|"compatibility_test_suite_package"|"test_suite_package"|"csuite-tradefed"|"catbox-tradefed"'
+          PATTERNS='"cts_defaults"|"mts_defaults"|"vts_defaults"|"sts_defaults"|"rs_defaults"|"mts-target-sdk-version-current"|"llvm_tblgen"|"cts-tradefed"|"vts-tradefed"|"mts-tradefed"|"compatibility_test_suite_package"|"test_suite_package"|"csuite-tradefed"|"catbox-tradefed"|"framework-connectivity-test-defaults"|"framework-connectivity-internal-test-defaults"|"framework-connectivity-t-defaults"'
 
           BROKEN_FILES=$(grep -rlE "$PATTERNS" --include="Android.bp" \
             --exclude-dir=".repo" \
