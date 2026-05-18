@@ -1,0 +1,288 @@
+name: Build External Camera HAL (HIDL 2.4)
+
+# ============================================================================
+# Phase 4A v4 — VCam Project (Santuyajah)
+# Target: android.hardware.camera.provider@2.4-external-service (arm64)
+# Plus:   camera.device@3.4-external-impl.so (arm64)
+# v4 fix: /tmp pindah ke /mnt/aosp (root partition penuh = sync fail)
+# ============================================================================
+
+on:
+  workflow_dispatch:
+    inputs:
+      aosp_branch:
+        description: 'AOSP branch (rec: android16-qpr2-release)'
+        required: true
+        default: 'android16-qpr2-release'
+      build_variant:
+        description: 'lunch target'
+        required: true
+        default: 'aosp_arm64-trunk_staging-userdebug'
+
+jobs:
+  build:
+    name: Build External Camera HAL
+    runs-on: ubuntu-22.04
+    timeout-minutes: 350
+
+    # Set TMPDIR & HOME global untuk semua step
+    env:
+      TMPDIR: /mnt/aosp/tmpdir
+      TMP: /mnt/aosp/tmpdir
+      TEMP: /mnt/aosp/tmpdir
+
+    steps:
+      # ---------- Step 1a: Aggressive cleanup (NEW) ----------
+      - name: Free disk (aggressive)
+        uses: jlumbroso/free-disk-space@main
+        with:
+          tool-cache: true
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: true
+          docker-images: true
+          swap-storage: false   # easimon akan handle swap
+
+      - name: Disk after jlumbroso cleanup
+        run: df -h
+
+      # ---------- Step 1b: Allocate big LVM at /mnt/aosp ----------
+      - name: Maximize build space (LVM)
+        uses: easimon/maximize-build-space@v10
+        with:
+          root-reserve-mb: 8192        # Sisa root 8GB (cleanup sebelumnya sudah agresif)
+          swap-size-mb: 16384
+          remove-dotnet: 'false'       # Sudah dihapus jlumbroso
+          remove-android: 'false'
+          remove-haskell: 'false'
+          remove-codeql: 'true'
+          remove-docker-images: 'false'
+          build-mount-path: '/mnt/aosp'
+
+      - name: Disk after easimon LVM
+        run: |
+          df -h
+          free -h
+
+      # ---------- Step 2: Bind /tmp ke /mnt/aosp (CRITICAL FIX) ----------
+      - name: Move /tmp to /mnt/aosp
+        run: |
+          sudo mkdir -p /mnt/aosp/tmpdir
+          sudo chmod 1777 /mnt/aosp/tmpdir
+          # Bind mount: semua write ke /tmp akan masuk ke /mnt/aosp/tmpdir
+          sudo mount --bind /mnt/aosp/tmpdir /tmp
+          # Bonus: bind /var/tmp juga (untuk apt & build tools)
+          sudo mkdir -p /mnt/aosp/vartmp
+          sudo chmod 1777 /mnt/aosp/vartmp
+          sudo mount --bind /mnt/aosp/vartmp /var/tmp
+          # Verifikasi
+          echo "=== Bind mount aktif ==="
+          mount | grep "/mnt/aosp"
+          df -h /tmp /var/tmp
+
+      # ---------- Step 3: Install build deps + clean cache ----------
+      - name: Install AOSP build deps
+        run: |
+          sudo apt-get update -qq
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
+            git-core gnupg flex bison build-essential zip curl zlib1g-dev \
+            libc6-dev-i386 libncurses-dev x11proto-core-dev libx11-dev \
+            lib32z1-dev libgl1-mesa-dev libxml2-utils xsltproc unzip \
+            fontconfig openjdk-17-jdk python3 python3-pip ccache rsync \
+            libssl-dev bc cpio kmod
+          sudo apt-get clean
+          sudo rm -rf /var/lib/apt/lists/*
+          sudo chown -R $USER:$USER /mnt/aosp
+
+      - name: Disk after install
+        run: df -h
+
+      # ---------- Step 4: Setup HOME, repo tool — semua di /mnt/aosp ----------
+      - name: Setup HOME & repo tool
+        run: |
+          # Pindah HOME ke /mnt/aosp untuk hindari root partition
+          mkdir -p /mnt/aosp/home
+          echo "HOME=/mnt/aosp/home" >> $GITHUB_ENV
+          
+          # Install repo tool
+          mkdir -p /mnt/aosp/bin
+          curl -s https://storage.googleapis.com/git-repo-downloads/repo > /mnt/aosp/bin/repo
+          chmod a+x /mnt/aosp/bin/repo
+          echo "/mnt/aosp/bin" >> $GITHUB_PATH
+          
+          # Git config global -> /mnt/aosp/home/.gitconfig
+          HOME=/mnt/aosp/home git config --global user.email "santuyajah6@gmail.com"
+          HOME=/mnt/aosp/home git config --global user.name "Santuyajah"
+          HOME=/mnt/aosp/home git config --global color.ui false
+          # Make git also use /mnt/aosp for temp objects
+          HOME=/mnt/aosp/home git config --global pack.threads 2
+
+      # ---------- Step 5: Repo init ----------
+      - name: Repo init
+        working-directory: /mnt/aosp
+        run: |
+          /mnt/aosp/bin/repo init \
+            -u https://android.googlesource.com/platform/manifest \
+            -b ${{ github.event.inputs.aosp_branch }} \
+            --depth=1 --no-tags --no-clone-bundle
+
+      # ---------- Step 6: Minimal local manifest ----------
+      - name: Apply minimal local manifest
+        working-directory: /mnt/aosp
+        run: |
+          mkdir -p .repo/local_manifests
+          cat > .repo/local_manifests/skip_safe.xml << 'EOF'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <manifest>
+            <remove-project name="platform/cts"/>
+          </manifest>
+          EOF
+
+      # ---------- Step 7a: Memory monitor (background) ----------
+      - name: Start memory monitor
+        run: |
+          mkdir -p /mnt/aosp/logs
+          (while true; do
+             echo "[$(date +%H:%M:%S)] MEM: $(free -m | grep '^Mem' | awk '{print "used="$3"M free="$4"M avail="$7"M"}') | DISK_root=$(df -BM / | tail -1 | awk '{print $4}') DISK_aosp=$(df -BM /mnt/aosp | tail -1 | awk '{print $4}')" >> /mnt/aosp/logs/monitor.log
+             sleep 30
+           done) &
+          echo $! > /mnt/aosp/logs/monitor.pid
+
+      # ---------- Step 7b: Repo sync dengan retry ----------
+      - name: Repo sync (with retry)
+        working-directory: /mnt/aosp
+        run: |
+          set +e
+          MAX_RETRY=3
+          for i in $(seq 1 $MAX_RETRY); do
+            echo "===== Sync attempt $i / $MAX_RETRY ====="
+            df -h | head -4
+            /mnt/aosp/bin/repo sync \
+              -c -j2 --force-sync --no-clone-bundle \
+              --no-tags --optimized-fetch
+            RC=$?
+            if [ $RC -eq 0 ]; then
+              echo "===== Sync sukses di attempt $i ====="
+              exit 0
+            fi
+            echo "===== Sync gagal (exit $RC), tunggu 60s lalu retry ====="
+            df -h
+            sleep 60
+            sync && echo 3 | sudo tee /proc/sys/vm/drop_caches >/dev/null || true
+          done
+          echo "===== Sync gagal setelah $MAX_RETRY attempts ====="
+          exit 1
+
+      - name: Stop memory monitor
+        if: always()
+        run: |
+          if [ -f /mnt/aosp/logs/monitor.pid ]; then
+            kill $(cat /mnt/aosp/logs/monitor.pid) 2>/dev/null || true
+          fi
+          echo "=== Monitor log tail (last 80 lines) ==="
+          tail -80 /mnt/aosp/logs/monitor.log || true
+
+      - name: Disk after sync
+        if: always()
+        run: df -h
+
+      # ---------- Step 8: Post-sync cleanup ----------
+      - name: Post-sync cleanup
+        working-directory: /mnt/aosp
+        run: |
+          echo "=== Sebelum cleanup ==="
+          du -sh . 2>/dev/null | tail -1
+          for d in \
+            test/vts test/vts-testcase \
+            external/chromium-webview external/cronet \
+            kernel/common kernel/common-modules \
+            prebuilts/abi-dumps external/llvm-project \
+            prebuilts/fuchsia_sdk developers docs tools/test cts ; do
+            [ -e "$d" ] && rm -rf "$d" && echo "Removed $d"
+          done
+          echo "=== Setelah cleanup ==="
+          du -sh . 2>/dev/null | tail -1
+          df -h /mnt/aosp
+
+      - name: Verify external camera HAL source
+        working-directory: /mnt/aosp
+        run: |
+          ls -la hardware/interfaces/camera/provider/2.4/default/ || exit 1
+          ls -la hardware/interfaces/camera/device/3.4/default/ || exit 1
+
+      # ---------- Step 9: Build ----------
+      - name: Build external camera HAL
+        working-directory: /mnt/aosp
+        run: |
+          set -e
+          set -o pipefail
+          source build/envsetup.sh
+          lunch ${{ github.event.inputs.build_variant }}
+          export USE_CCACHE=1
+          export CCACHE_DIR=/mnt/aosp/ccache
+          ccache -M 8G
+          ccache -z
+
+          m -j$(nproc) \
+            android.hardware.camera.provider@2.4-external-service \
+            camera.device@3.4-external-impl \
+            2>&1 | tee /mnt/aosp/build.log
+
+          ccache -s
+
+      # ---------- Step 10: Collect ----------
+      - name: Collect artifacts
+        working-directory: /mnt/aosp
+        run: |
+          mkdir -p $GITHUB_WORKSPACE/artifacts/vendor/bin/hw
+          mkdir -p $GITHUB_WORKSPACE/artifacts/vendor/lib64/hw
+          mkdir -p $GITHUB_WORKSPACE/artifacts/source_reference
+
+          find out -type f -name "android.hardware.camera.provider@2.4-external-service" \
+            -not -path "*/symbols/*" -not -path "*/unstripped/*" \
+            -exec cp -v {} $GITHUB_WORKSPACE/artifacts/vendor/bin/hw/ \;
+
+          find out -type f -name "camera.device@3.4-external-impl.so" \
+            -not -path "*/symbols/*" -not -path "*/unstripped/*" \
+            -exec cp -v {} $GITHUB_WORKSPACE/artifacts/vendor/lib64/hw/ \;
+
+          find out -type f -name "*camera*external*.rc" \
+            -exec cp -v {} $GITHUB_WORKSPACE/artifacts/source_reference/ \; 2>/dev/null || true
+          find hardware/interfaces/camera -type f -name "manifest*.xml" \
+            -exec cp -v {} $GITHUB_WORKSPACE/artifacts/source_reference/ \; 2>/dev/null || true
+          find . -type f -name "hal_camera*.te" \
+            -exec cp -v {} $GITHUB_WORKSPACE/artifacts/source_reference/ \; 2>/dev/null || true
+
+      - name: Show final artifacts
+        run: |
+          find $GITHUB_WORKSPACE/artifacts -type f -exec ls -la {} \;
+          du -sh $GITHUB_WORKSPACE/artifacts/
+
+      # ---------- Step 11: Upload ----------
+      - name: Upload HAL artifacts
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: external-camera-hal-arm64
+          path: artifacts/
+          retention-days: 30
+          if-no-files-found: error
+
+      - name: Upload build log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log
+          path: /mnt/aosp/build.log
+          retention-days: 14
+          if-no-files-found: ignore
+
+      - name: Upload monitor logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: monitor-logs
+          path: /mnt/aosp/logs/
+          retention-days: 14
+          if-no-files-found: ignore
