@@ -163,13 +163,17 @@ jobs:
           # Make git also use /mnt/aosp for temp objects
           HOME=/mnt/aosp/home git config --global pack.threads 2
 
-      # ---------- Step 5: Repo init ----------
+      # ---------- Step 5: Repo init (v6: pakai group filter untuk skip CTS/VTS/PDK) ----------
       - name: Repo init
         working-directory: /mnt/aosp
         run: |
+          # -g default,-pdk,-pdk-cw,-pdk-fs,-cts,-vts,-tests
+          #   = sync semua project DEFAULT, MINUS group test/PDK
+          #   Ini hemat ~50-70GB disk (CTS/VTS/PDK isinya test files & prebuilts non-essential)
           /mnt/aosp/bin/repo init \
             -u https://android.googlesource.com/platform/manifest \
             -b ${{ github.event.inputs.aosp_branch }} \
+            -g default,-pdk,-pdk-cw,-pdk-fs,-cts,-vts,-tests \
             --depth=1 --no-tags --no-clone-bundle
 
       # ---------- Step 6: Minimal local manifest ----------
@@ -203,12 +207,19 @@ jobs:
           for i in $(seq 1 $MAX_RETRY); do
             echo "===== Sync attempt $i / $MAX_RETRY ====="
             df -h | head -4
+            # Early warning: cek free space sebelum mulai
+            FREE_AOSP_GB=$(df -BG /mnt/aosp | tail -1 | awk '{print $4}' | tr -d 'G')
+            echo "Free di /mnt/aosp sebelum sync: ${FREE_AOSP_GB}G"
+            if [ "$FREE_AOSP_GB" -lt 50 ]; then
+              echo "WARNING: Free space < 50G, sync mungkin gagal"
+            fi
             /mnt/aosp/bin/repo sync \
               -c -j2 --force-sync --no-clone-bundle \
               --no-tags --optimized-fetch
             RC=$?
             if [ $RC -eq 0 ]; then
               echo "===== Sync sukses di attempt $i ====="
+              df -h /mnt/aosp
               exit 0
             fi
             echo "===== Sync gagal (exit $RC), tunggu 60s lalu retry ====="
