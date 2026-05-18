@@ -1,26 +1,23 @@
-name: Build External Camera HAL (AIDL V1) — v9.5
+name: Build External Camera HAL (AIDL V1) — v9.6
 
 # ============================================================================
-# Phase 4A v9.5 — VCam Project (Santuyajah)
+# Phase 4A v9.6 — VCam Project (Santuyajah)
 # Target: android.hardware.camera.provider-V1-external-service (arm64)
 #
+# Perubahan v9.6 vs v9.5:
+#   - v9.5 lulus lunch (semua VNDK ada), tapi gagal di soong bootstrap:
+#     "unrecognized module type llvm_tblgen" di:
+#       frameworks/compile/mclinker/tools/mcld/Android.bp:29
+#       frameworks/compile/slang/Android.bp:158
+#     Module type llvm_tblgen didefinisikan di external/llvm-project
+#     yang kita prune. mclinker+slang reference itu.
+#   - Fix: prune juga mclinker, slang, libbcc, frameworks/rs.
+#     Semua adalah RenderScript compiler chain — camera HAL TIDAK pakai.
+#
 # Perubahan v9.5 vs v9.4:
-#   - v9.3 prune SEMUA vndk -> "VNDK 31 not found"
-#   - v9.4 kembalikan vndk/v31 saja -> "VNDK 32 not found"
-#   LESSON LEARNED: lunch aosp_arm64-trunk_staging-userdebug iterasi
-#   cek SEMUA VNDK di PRODUCT_EXTRA_VNDK_VERSIONS=[30..35]. Selektif
-#   tidak bisa, harus KEEP ALL VNDK.
-#   - v9.5 keep all VNDK (cost +15GB), kompensasi:
-#     * Disable ccache (hemat 8GB)
-#     * Tambah TIER 8 prune: darwin prebuilts, kernel binaries,
-#       Settings/SystemUI/Launcher apps, grpc/tensorflow (~10GB)
-#   - Trade-off: build pertama ~2.5 jam (vs ~2 jam dengan ccache)
-#
-# Perubahan v9.4 vs v9.3:
-#   - Kembalikan vndk/v31 (kurang masih untuk lunch target)
-#
-# Perubahan v9.3 vs v9.2:
-#   - Aggressive prune ~60GB via local_manifest dengan optional="true"
+#   - Keep ALL VNDK v30-v35 (lunch target butuh semua)
+#   - TIER 8 prune ~10GB (darwin/kernel/apps/grpc/tensorflow)
+#   - Disable ccache (hemat 8GB)
 # ============================================================================
 
 on:
@@ -303,6 +300,19 @@ jobs:
             <remove-project name="platform/external/grpc-grpc-java" optional="true"/>
             <remove-project name="platform/external/tensorflow" optional="true"/>
             <remove-project name="platform/external/sonivox" optional="true"/>
+
+            <!-- ===== TIER 9 (v9.6): RenderScript compiler chain ~5GB ===== -->
+            <!-- Error v9.5 di soong bootstrap:
+                   frameworks/compile/mclinker/tools/mcld/Android.bp:29:1:
+                     unrecognized module type "llvm_tblgen"
+                   frameworks/compile/slang/Android.bp:158:1: unrecognized module type "llvm_tblgen"
+                 Sebab: llvm_tblgen didefinisikan di external/llvm-project yang kita prune.
+                 Solusi: prune juga mclinker + slang yang reference module type tsb.
+                 Camera HAL TIDAK pakai RenderScript chain ini. -->
+            <remove-project name="platform/frameworks/compile/mclinker" optional="true"/>
+            <remove-project name="platform/frameworks/compile/slang" optional="true"/>
+            <remove-project name="platform/frameworks/compile/libbcc" optional="true"/>
+            <remove-project name="platform/frameworks/rs" optional="true"/>
           </manifest>
           EOF
           echo "=== Local manifest content ==="
