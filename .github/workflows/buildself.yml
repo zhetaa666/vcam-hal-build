@@ -1,4 +1,4 @@
-name: Build External Camera HAL (AIDL V1) v10.5 (Self-Hosted Final)
+name: Build External Camera HAL (AIDL V1) v10.6 (Self-Hosted Final)
 
 on:
   workflow_dispatch:
@@ -52,11 +52,15 @@ jobs:
         run: |
           echo "Menghapus folder test yang mencari dependency cts_defaults dll..."
           for d in \
+            frameworks/libs/systemui/mechanics/tests \
+            frameworks/libs/systemui/mechanics/compose/tests \
+            hardware/interfaces/virtualization/capabilities_service/vts \
+            packages/modules/AdServices \
+            packages/modules/Connectivity/Tethering \
             tools/tradefederation \
             tools/loganalysis \
             external/rust/cxx \
             platform_testing \
-            packages/modules/AdServices/adservices/tests \
             packages/modules/Profiling/tests \
             packages/modules/DeviceLock/tests \
             packages/modules/StatsD/tests \
@@ -75,8 +79,6 @@ jobs:
             tools/platform-compat/java/android/compat/testing/app \
             packages/modules/Connectivity/bpf/tests \
             packages/modules/Connectivity/tests \
-            packages/modules/Connectivity/Tethering/tests \
-            packages/modules/Connectivity/Tethering/apex \
             packages/modules/CaptivePortalLogin/tests \
             packages/modules/NetworkStack/tests \
             packages/modules/IPsec/tests \
