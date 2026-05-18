@@ -1,10 +1,17 @@
-name: Build External Camera HAL (HIDL 2.4)
+name: Build External Camera HAL (AIDL V1) — v8
 
 # ============================================================================
-# Phase 4A v4 — VCam Project (Santuyajah)
-# Target: android.hardware.camera.provider@2.4-external-service (arm64)
-# Plus:   camera.device@3.4-external-impl.so (arm64)
-# v4 fix: /tmp pindah ke /mnt/aosp (root partition penuh = sync fail)
+# Phase 4A v8 — VCam Project (Santuyajah)
+# Target: android.hardware.camera.provider-V1-external-service (arm64)
+# Plus:   android.hardware.camera.provider-V1-external-impl.so
+#         camera.device-external-impl.so
+#
+# Perubahan v8 vs v7:
+#   - Tambah --fail-fast ke repo sync (silent partial fail di v7 = root cause hipotesis #2)
+#   - Tambah step "Diagnose hardware tree" SEBELUM Verify (debug rekomendasi user)
+#   - Tambah step "Auto-recover hardware/interfaces" kalau folder missing
+#   - Tambah upload manifest_dump.xml + repo_list.txt sebagai diagnostic artifact
+#   - Verify step kasih pesan error yang jelas + instruksi
 # ============================================================================
 
 on:
@@ -25,14 +32,13 @@ jobs:
     runs-on: ubuntu-22.04
     timeout-minutes: 350
 
-    # Set TMPDIR & HOME global untuk semua step
     env:
       TMPDIR: /mnt/aosp/tmpdir
       TMP: /mnt/aosp/tmpdir
       TEMP: /mnt/aosp/tmpdir
 
     steps:
-      # ---------- Step 1a: Aggressive cleanup (NEW) ----------
+      # ---------- Step 1a: Aggressive cleanup ----------
       - name: Free disk (aggressive)
         uses: jlumbroso/free-disk-space@main
         with:
@@ -42,7 +48,7 @@ jobs:
           haskell: true
           large-packages: true
           docker-images: true
-          swap-storage: false   # easimon akan handle swap
+          swap-storage: false
 
       - name: Disk after jlumbroso cleanup
         run: df -h
@@ -51,9 +57,9 @@ jobs:
       - name: Maximize build space (LVM)
         uses: easimon/maximize-build-space@v10
         with:
-          root-reserve-mb: 8192        # Sisa root 8GB (cleanup sebelumnya sudah agresif)
+          root-reserve-mb: 8192
           swap-size-mb: 16384
-          remove-dotnet: 'false'       # Sudah dihapus jlumbroso
+          remove-dotnet: 'false'
           remove-android: 'false'
           remove-haskell: 'false'
           remove-codeql: 'true'
@@ -65,20 +71,14 @@ jobs:
           df -h
           free -h
 
-      # ---------- Step 2: Symlink /tmp ke /mnt/aosp (CRITICAL FIX v5) ----------
+      # ---------- Step 2: Symlink /tmp & /var/tmp ke /mnt/aosp ----------
       - name: Replace /tmp & /var/tmp with symlinks to /mnt/aosp
         run: |
-          # Buat folder target di /mnt/aosp
           sudo mkdir -p /mnt/aosp/tmpdir /mnt/aosp/vartmp /mnt/aosp/aptcache
           sudo chmod 1777 /mnt/aosp/tmpdir /mnt/aosp/vartmp
 
-          # AGGRESSIVE root cleanup — buang large dirs yang jarang dipakai
           echo "=== Sebelum aggressive cleanup ==="
           df -h /
-          sudo du -sh /usr/share/swift /opt/hostedtoolcache /opt/google /opt/microsoft \
-                      /usr/local/lib/node_modules /usr/local/.ghcup \
-                      /usr/local/share/powershell /usr/local/share/chromium \
-                      /usr/share/dotnet /usr/lib/snapd 2>/dev/null || true
           sudo rm -rf \
             /usr/share/swift \
             /opt/hostedtoolcache/PyPy \
@@ -97,36 +97,27 @@ jobs:
             /usr/lib/jvm/temurin-8* \
             /usr/lib/jvm/temurin-11* \
             2>/dev/null || true
-
           echo "=== Setelah aggressive cleanup ==="
           df -h /
 
-          # SYMLINK /tmp & /var/tmp (lebih reliable dari bind mount)
-          # Note: harus stop service yang mungkin pakai /tmp dulu
           sudo systemctl stop snapd.service snapd.socket 2>/dev/null || true
-
-          # Pindah isi /tmp & /var/tmp yang ada (kalau ada) ke target
           sudo rm -rf /tmp.old /var/tmp.old 2>/dev/null || true
           sudo mv /tmp /tmp.old
           sudo mv /var/tmp /var/tmp.old
           sudo ln -s /mnt/aosp/tmpdir /tmp
           sudo ln -s /mnt/aosp/vartmp /var/tmp
-          # Pindah apt cache juga
           sudo rm -rf /var/cache/apt/archives
           sudo ln -s /mnt/aosp/aptcache /var/cache/apt/archives
 
-          # Verifikasi
           echo "=== Verifikasi symlinks ==="
           ls -la /tmp /var/tmp /var/cache/apt/archives
-          echo "=== Test tulis ke /tmp ==="
           echo "test" > /tmp/test.txt && cat /tmp/test.txt && rm /tmp/test.txt
           echo "Symlink target /tmp -> $(readlink -f /tmp)"
           echo "Symlink target /var/tmp -> $(readlink -f /var/tmp)"
           df -h /tmp /var/tmp
-          echo "=== Inode check ==="
           df -i /mnt/aosp /
 
-      # ---------- Step 3: Install build deps + clean cache ----------
+      # ---------- Step 3: Install build deps ----------
       - name: Install AOSP build deps
         run: |
           sudo apt-get update -qq
@@ -143,40 +134,33 @@ jobs:
       - name: Disk after install
         run: df -h
 
-      # ---------- Step 4: Setup HOME, repo tool — semua di /mnt/aosp ----------
+      # ---------- Step 4: Setup HOME & repo tool ----------
       - name: Setup HOME & repo tool
         run: |
-          # Pindah HOME ke /mnt/aosp untuk hindari root partition
           mkdir -p /mnt/aosp/home
           echo "HOME=/mnt/aosp/home" >> $GITHUB_ENV
-          
-          # Install repo tool
+
           mkdir -p /mnt/aosp/bin
           curl -s https://storage.googleapis.com/git-repo-downloads/repo > /mnt/aosp/bin/repo
           chmod a+x /mnt/aosp/bin/repo
           echo "/mnt/aosp/bin" >> $GITHUB_PATH
-          
-          # Git config global -> /mnt/aosp/home/.gitconfig
+
           HOME=/mnt/aosp/home git config --global user.email "santuyajah6@gmail.com"
           HOME=/mnt/aosp/home git config --global user.name "Santuyajah"
           HOME=/mnt/aosp/home git config --global color.ui false
-          # Make git also use /mnt/aosp for temp objects
           HOME=/mnt/aosp/home git config --global pack.threads 2
 
-      # ---------- Step 5: Repo init (v6: pakai group filter untuk skip CTS/VTS/PDK) ----------
+      # ---------- Step 5: Repo init dengan group filter ----------
       - name: Repo init
         working-directory: /mnt/aosp
         run: |
-          # -g default,-pdk,-pdk-cw,-pdk-fs,-cts,-vts,-tests
-          #   = sync semua project DEFAULT, MINUS group test/PDK
-          #   Ini hemat ~50-70GB disk (CTS/VTS/PDK isinya test files & prebuilts non-essential)
           /mnt/aosp/bin/repo init \
             -u https://android.googlesource.com/platform/manifest \
             -b ${{ github.event.inputs.aosp_branch }} \
             -g default,-pdk,-pdk-cw,-pdk-fs,-cts,-vts,-tests \
             --depth=1 --no-tags --no-clone-bundle
 
-      # ---------- Step 6: Minimal local manifest ----------
+      # ---------- Step 6: Local manifest ----------
       - name: Apply minimal local manifest
         working-directory: /mnt/aosp
         run: |
@@ -188,7 +172,34 @@ jobs:
           </manifest>
           EOF
 
-      # ---------- Step 7a: Memory monitor (background) ----------
+      # ---------- Step 6b (NEW v8): Pre-sync manifest validation ----------
+      # Tujuan: konfirmasi platform/hardware/interfaces ADA di manifest setelah
+      # group filter diterapkan. Kalau tidak ada di sini, root cause = hipotesis #1.
+      - name: Pre-sync manifest validation
+        working-directory: /mnt/aosp
+        run: |
+          mkdir -p /mnt/aosp/logs
+          echo "=== Dump manifest yang sudah di-resolve (post-group-filter) ==="
+          /mnt/aosp/bin/repo manifest -r -o /mnt/aosp/logs/manifest_dump.xml
+          echo "manifest_dump.xml size: $(stat -c%s /mnt/aosp/logs/manifest_dump.xml) bytes"
+          echo ""
+          echo "=== Cek apakah platform/hardware/interfaces ada di manifest ==="
+          if grep -q 'name="platform/hardware/interfaces"' /mnt/aosp/logs/manifest_dump.xml; then
+            echo "OK: platform/hardware/interfaces TERMASUK dalam manifest setelah filter"
+            grep -A1 'name="platform/hardware/interfaces"' /mnt/aosp/logs/manifest_dump.xml | head -10
+          else
+            echo "FATAL: platform/hardware/interfaces TIDAK ADA di manifest!"
+            echo "=> Group filter terlalu agresif. Cek hipotesis #1."
+            echo ""
+            echo "=== Project apa saja yang ada di manifest (sample) ==="
+            grep -oE 'name="[^"]+"' /mnt/aosp/logs/manifest_dump.xml | head -50
+            exit 1
+          fi
+          echo ""
+          echo "=== List semua project hardware/* di manifest ==="
+          grep -oE 'name="platform/hardware/[^"]+"' /mnt/aosp/logs/manifest_dump.xml | sort -u
+
+      # ---------- Step 7a: Memory monitor ----------
       - name: Start memory monitor
         run: |
           mkdir -p /mnt/aosp/logs
@@ -198,8 +209,8 @@ jobs:
            done) &
           echo $! > /mnt/aosp/logs/monitor.pid
 
-      # ---------- Step 7b: Repo sync dengan retry ----------
-      - name: Repo sync (with retry)
+      # ---------- Step 7b: Repo sync (v8: tambah --fail-fast) ----------
+      - name: Repo sync (with retry & fail-fast)
         working-directory: /mnt/aosp
         run: |
           set +e
@@ -207,15 +218,15 @@ jobs:
           for i in $(seq 1 $MAX_RETRY); do
             echo "===== Sync attempt $i / $MAX_RETRY ====="
             df -h | head -4
-            # Early warning: cek free space sebelum mulai
             FREE_AOSP_GB=$(df -BG /mnt/aosp | tail -1 | awk '{print $4}' | tr -d 'G')
             echo "Free di /mnt/aosp sebelum sync: ${FREE_AOSP_GB}G"
             if [ "$FREE_AOSP_GB" -lt 50 ]; then
               echo "WARNING: Free space < 50G, sync mungkin gagal"
             fi
+            # v8: --fail-fast biar partial-fail langsung exit nonzero (root cause hipotesis #2)
             /mnt/aosp/bin/repo sync \
               -c -j2 --force-sync --no-clone-bundle \
-              --no-tags --optimized-fetch
+              --no-tags --optimized-fetch --fail-fast
             RC=$?
             if [ $RC -eq 0 ]; then
               echo "===== Sync sukses di attempt $i ====="
@@ -244,37 +255,179 @@ jobs:
         run: df -h
 
       # ---------- Step 8: Post-sync cleanup ----------
-      - name: Post-sync cleanup
+      # Note v8: HAPUS test/vts dari list cleanup karena hardware/interfaces TIDAK
+      # masuk test/vts. Tapi pertahankan kalau ada folder yang aman dihapus.
+      - name: Post-sync cleanup (safe targets only)
         working-directory: /mnt/aosp
         run: |
           echo "=== Sebelum cleanup ==="
           du -sh . 2>/dev/null | tail -1
           for d in \
-            test/vts test/vts-testcase \
             external/chromium-webview external/cronet \
             kernel/common kernel/common-modules \
             prebuilts/abi-dumps external/llvm-project \
-            prebuilts/fuchsia_sdk developers docs tools/test cts ; do
+            prebuilts/fuchsia_sdk developers docs ; do
             [ -e "$d" ] && rm -rf "$d" && echo "Removed $d"
           done
+          # SENGAJA TIDAK HAPUS: test/* karena bisa overlap dengan project apapun
+          # SENGAJA TIDAK HAPUS: cts/ karena sudah di-skip via local_manifest
           echo "=== Setelah cleanup ==="
           du -sh . 2>/dev/null | tail -1
           df -h /mnt/aosp
 
+      # ---------- Step 8b (NEW v8): Diagnose hardware tree ----------
+      - name: Diagnose hardware tree (BEFORE Verify)
+        working-directory: /mnt/aosp
+        run: |
+          echo "============================================================"
+          echo " DIAGNOSTIC: Hardware Tree State After Sync"
+          echo "============================================================"
+
+          echo ""
+          echo "--- 1. /mnt/aosp top level ---"
+          ls /mnt/aosp 2>&1 | head -50
+
+          echo ""
+          echo "--- 2. /mnt/aosp/hardware ---"
+          ls /mnt/aosp/hardware 2>&1 | head -50 || echo "MISSING: /mnt/aosp/hardware"
+
+          echo ""
+          echo "--- 3. /mnt/aosp/hardware/interfaces ---"
+          ls /mnt/aosp/hardware/interfaces 2>&1 | head -50 || echo "MISSING: hardware/interfaces"
+
+          echo ""
+          echo "--- 4. /mnt/aosp/hardware/interfaces/camera ---"
+          ls /mnt/aosp/hardware/interfaces/camera 2>&1 | head -50 || echo "MISSING: hardware/interfaces/camera"
+
+          echo ""
+          echo "--- 5. /mnt/aosp/hardware/interfaces/camera/provider ---"
+          ls /mnt/aosp/hardware/interfaces/camera/provider 2>&1 | head -50 || echo "MISSING: camera/provider"
+
+          echo ""
+          echo "--- 6. /mnt/aosp/hardware/interfaces/camera/device ---"
+          ls /mnt/aosp/hardware/interfaces/camera/device 2>&1 | head -50 || echo "MISSING: camera/device"
+
+          echo ""
+          echo "--- 7. find: semua folder bernama 'camera' (depth<=4) ---"
+          find /mnt/aosp -maxdepth 4 -type d -name "camera" 2>/dev/null | head -30
+
+          echo ""
+          echo "--- 8. find: ExternalCameraProvider.cpp di mana saja ---"
+          find /mnt/aosp -name "ExternalCameraProvider.cpp" 2>/dev/null | head -10
+
+          echo ""
+          echo "--- 9. find: ExternalCameraDevice.cpp di mana saja ---"
+          find /mnt/aosp -name "ExternalCameraDevice.cpp" 2>/dev/null | head -10
+
+          echo ""
+          echo "--- 10. find: file Android.bp di tree camera (depth<=6) ---"
+          find /mnt/aosp/hardware/interfaces/camera -maxdepth 6 -name "Android.bp" 2>/dev/null | head -20 || true
+
+          echo ""
+          echo "--- 11. repo project list (filtered: hardware) ---"
+          /mnt/aosp/bin/repo list 2>/dev/null | grep -E "hardware|HARDWARE" | tee /mnt/aosp/logs/repo_list_hardware.txt | head -50 || true
+
+          echo ""
+          echo "--- 12. repo list TOTAL ---"
+          /mnt/aosp/bin/repo list 2>/dev/null | tee /mnt/aosp/logs/repo_list.txt | wc -l
+          echo "Total project count above"
+
+          echo ""
+          echo "--- 13. Cek status sync untuk hardware/interfaces ---"
+          if [ -d /mnt/aosp/hardware/interfaces ]; then
+            cd /mnt/aosp/hardware/interfaces
+            echo "git status:"
+            git status 2>&1 | head -10 || true
+            echo "git log -1:"
+            git log -1 --oneline 2>&1 || true
+            cd /mnt/aosp
+          else
+            echo "/mnt/aosp/hardware/interfaces TIDAK ADA — sync gagal silent"
+          fi
+
+          echo ""
+          echo "============================================================"
+          echo " END DIAGNOSTIC"
+          echo "============================================================"
+
+      # ---------- Step 8c (NEW v8): Auto-recover hardware/interfaces kalau missing ----------
+      - name: Auto-recover hardware/interfaces (if missing)
+        working-directory: /mnt/aosp
+        run: |
+          if [ ! -d /mnt/aosp/hardware/interfaces/camera/provider/default ]; then
+            echo "=== Folder target missing — coba force-sync platform/hardware/interfaces saja ==="
+            /mnt/aosp/bin/repo sync \
+              -c -j2 --force-sync --no-clone-bundle \
+              --no-tags --optimized-fetch \
+              platform/hardware/interfaces || true
+            echo ""
+            echo "=== Setelah recovery sync ==="
+            ls /mnt/aosp/hardware/interfaces/camera/provider/ 2>&1 | head -20
+            ls /mnt/aosp/hardware/interfaces/camera/device/ 2>&1 | head -20
+          else
+            echo "=== Folder target ADA, skip auto-recovery ==="
+          fi
+
+      # ---------- Step 8d (NEW v8): Upload diagnostic artifacts SEBELUM verify ----------
+      # Penting: upload diagnostic dulu biar kalau Verify fail, user tetap bisa lihat
+      - name: Upload diagnostic artifacts (pre-verify)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: diagnostic-pre-verify
+          path: |
+            /mnt/aosp/logs/manifest_dump.xml
+            /mnt/aosp/logs/repo_list.txt
+            /mnt/aosp/logs/repo_list_hardware.txt
+            /mnt/aosp/logs/monitor.log
+          retention-days: 14
+          if-no-files-found: warn
+
+      # ---------- Step 8e: Verify (dengan pesan error yang clear) ----------
       - name: Verify external camera HAL source
         working-directory: /mnt/aosp
         run: |
-          echo "=== camera/provider/default/ (lokasi baru Android 13+) ==="
-          ls -la hardware/interfaces/camera/provider/default/ || exit 1
+          MISSING=0
+          echo "=== camera/provider/default/ ==="
+          if ls -la hardware/interfaces/camera/provider/default/ 2>/dev/null | head -30; then
+            echo "OK: provider/default/ ADA"
+          else
+            echo "FATAL: hardware/interfaces/camera/provider/default/ TIDAK ADA"
+            MISSING=1
+          fi
           echo ""
-          echo "=== camera/device/default/ (lokasi baru Android 13+) ==="
-          ls -la hardware/interfaces/camera/device/default/ || exit 1
+          echo "=== camera/device/default/ ==="
+          if ls -la hardware/interfaces/camera/device/default/ 2>/dev/null | head -30; then
+            echo "OK: device/default/ ADA"
+          else
+            echo "FATAL: hardware/interfaces/camera/device/default/ TIDAK ADA"
+            MISSING=1
+          fi
           echo ""
-          echo "=== Konfirmasi source ExternalCameraProvider.cpp ada ==="
-          test -f hardware/interfaces/camera/provider/default/ExternalCameraProvider.cpp && echo "OK" || exit 1
-          test -f hardware/interfaces/camera/device/default/ExternalCameraDevice.cpp && echo "OK" || exit 1
+          echo "=== File-file kunci ==="
+          for f in \
+            hardware/interfaces/camera/provider/default/ExternalCameraProvider.cpp \
+            hardware/interfaces/camera/device/default/ExternalCameraDevice.cpp ; do
+            if [ -f "$f" ]; then
+              echo "OK: $f"
+            else
+              echo "MISSING: $f"
+              MISSING=1
+            fi
+          done
 
-      # ---------- Step 9: Build (v7: module names baru) ----------
+          if [ $MISSING -ne 0 ]; then
+            echo ""
+            echo "=========================================================="
+            echo " VERIFY GAGAL — cek artifact 'diagnostic-pre-verify'"
+            echo " untuk manifest_dump.xml + repo_list_hardware.txt"
+            echo "=========================================================="
+            exit 1
+          fi
+          echo ""
+          echo "=== Verify SUKSES ==="
+
+      # ---------- Step 9: Build ----------
       - name: Build external camera HAL
         working-directory: /mnt/aosp
         run: |
@@ -287,10 +440,6 @@ jobs:
           ccache -M 8G
           ccache -z
 
-          # Module names BARU di Android 13+ (was @2.4-external-service):
-          #   android.hardware.camera.provider-V1-external-service  (binary daemon)
-          #   android.hardware.camera.provider-V1-external-impl     (provider .so)
-          #   camera.device-external-impl                            (device .so)
           m -j$(nproc) \
             android.hardware.camera.provider-V1-external-service \
             android.hardware.camera.provider-V1-external-impl \
@@ -299,7 +448,7 @@ jobs:
 
           ccache -s
 
-      # ---------- Step 10: Collect (v7: nama baru) ----------
+      # ---------- Step 10: Collect ----------
       - name: Collect artifacts
         working-directory: /mnt/aosp
         run: |
@@ -308,26 +457,21 @@ jobs:
           mkdir -p $GITHUB_WORKSPACE/artifacts/vendor/etc/init
           mkdir -p $GITHUB_WORKSPACE/artifacts/source_reference
 
-          # Binary service (Android 13+ naming)
           find out -type f -name "android.hardware.camera.provider-V1-external-service" \
             -not -path "*/symbols/*" -not -path "*/unstripped/*" \
             -exec cp -v {} $GITHUB_WORKSPACE/artifacts/vendor/bin/hw/ \;
 
-          # Provider impl .so
           find out -type f -name "android.hardware.camera.provider-V1-external-impl.so" \
             -not -path "*/symbols/*" -not -path "*/unstripped/*" \
             -exec cp -v {} $GITHUB_WORKSPACE/artifacts/vendor/lib64/hw/ \;
 
-          # Device impl .so
           find out -type f -name "camera.device-external-impl.so" \
             -not -path "*/symbols/*" -not -path "*/unstripped/*" \
             -exec cp -v {} $GITHUB_WORKSPACE/artifacts/vendor/lib64/hw/ \;
 
-          # Init RC files
           find out -type f -name "android.hardware.camera.provider-V1-external-service*.rc" \
             -exec cp -v {} $GITHUB_WORKSPACE/artifacts/vendor/etc/init/ \; 2>/dev/null || true
 
-          # Source reference: copy untuk inspect Phase 4B (Android.bp, .te, manifest fragments)
           cp -v hardware/interfaces/camera/provider/default/Android.bp \
             $GITHUB_WORKSPACE/artifacts/source_reference/provider_Android.bp 2>/dev/null || true
           cp -v hardware/interfaces/camera/device/default/Android.bp \
@@ -335,11 +479,8 @@ jobs:
           cp -v hardware/interfaces/camera/provider/default/*.rc \
             $GITHUB_WORKSPACE/artifacts/source_reference/ 2>/dev/null || true
 
-          # Cari SELinux .te terkait camera
           find . -type f \( -name "hal_camera*.te" -o -name "*camera_external*.te" \) \
             -exec cp -v {} $GITHUB_WORKSPACE/artifacts/source_reference/ \; 2>/dev/null || true
-
-          # Cari VINTF manifest fragments
           find . -type f -name "*camera*external*manifest*.xml" \
             -exec cp -v {} $GITHUB_WORKSPACE/artifacts/source_reference/ \; 2>/dev/null || true
 
