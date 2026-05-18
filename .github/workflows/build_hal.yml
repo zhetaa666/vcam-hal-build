@@ -1,23 +1,21 @@
-name: Build External Camera HAL (AIDL V1) — v9.6
+name: Build External Camera HAL (AIDL V1) — v9.7
 
 # ============================================================================
-# Phase 4A v9.6 — VCam Project (Santuyajah)
+# Phase 4A v9.7 — VCam Project (Santuyajah)
 # Target: android.hardware.camera.provider-V1-external-service (arm64)
 #
-# Perubahan v9.6 vs v9.5:
-#   - v9.5 lulus lunch (semua VNDK ada), tapi gagal di soong bootstrap:
-#     "unrecognized module type llvm_tblgen" di:
-#       frameworks/compile/mclinker/tools/mcld/Android.bp:29
-#       frameworks/compile/slang/Android.bp:158
-#     Module type llvm_tblgen didefinisikan di external/llvm-project
-#     yang kita prune. mclinker+slang reference itu.
-#   - Fix: prune juga mclinker, slang, libbcc, frameworks/rs.
-#     Semua adalah RenderScript compiler chain — camera HAL TIDAK pakai.
+# Perubahan v9.7 vs v9.6:
+#   - v9.6 lulus prune llvm_tblgen tapi gagal di soong bootstrap dengan
+#     5+ error reference broken: cts_defaults, mts-target-sdk-version-current.
+#   - Pola: setiap kita prune project test, ada Android.bp di module lain
+#     yang reference simbol yang hilang. Whack-a-mole game tidak akan selesai.
+#   - Solusi v9.7: tambah Step 8a yang scan SEMUA Android.bp untuk reference
+#     broken (cts_defaults/mts-*/vts-*/llvm_tblgen/rs_defaults), lalu rename
+#     file Android.bp tsb ke .bp.disabled. Soong skip directory tanpa Android.bp.
+#     Camera HAL Android.bp tetap dipertahankan (eksplisit di-skip).
 #
-# Perubahan v9.5 vs v9.4:
-#   - Keep ALL VNDK v30-v35 (lunch target butuh semua)
-#   - TIER 8 prune ~10GB (darwin/kernel/apps/grpc/tensorflow)
-#   - Disable ccache (hemat 8GB)
+# Perubahan v9.6 vs v9.5:
+#   - Prune RenderScript chain (mclinker, slang, libbcc, frameworks/rs)
 # ============================================================================
 
 on:
@@ -491,6 +489,70 @@ jobs:
           echo "=== Setelah cleanup ==="
           du -sh . 2>/dev/null | tail -1
           df -h /mnt/aosp
+
+      # ---------- Step 8a (NEW v9.7): Strip Android.bp dengan reference broken ----------
+      # Strategi:
+      #   Daripada whack-a-mole prune project per project, scan semua Android.bp
+      #   yang masih reference simbol yang sudah hilang (cts_defaults,
+      #   mts-target-sdk-version-current, llvm_tblgen, dll), lalu HAPUS file
+      #   Android.bp tersebut. Project-nya tetap ada, hanya build manifest
+      #   untuk file tersebut yang dihilangkan.
+      # 
+      #   Camera HAL TIDAK butuh modul test/CTS/MTS apapun. Aman.
+      # 
+      # Symbol yang dihapus (terkait test yang sudah di-prune):
+      #   - cts_defaults              (dari platform/cts)
+      #   - mts_defaults / mts-*      (dari platform/test/mts)
+      #   - vts_defaults / vts-*      (dari platform/test/vts)
+      #   - llvm_tblgen / llvm_*      (dari platform/external/llvm-project)
+      #   - rs_defaults               (dari platform/frameworks/rs)
+      - name: Strip broken Android.bp (reference pruned modules)
+        working-directory: /mnt/aosp
+        run: |
+          echo "=== Scanning Android.bp dengan reference broken modules ==="
+          # Pattern broken: simbol yang dipakai di defaults / dependencies
+          PATTERNS='"cts_defaults"|"mts_defaults"|"mts-target-sdk-version-current"|"vts_defaults"|"llvm_tblgen"|"rs_defaults"|"cts-tradefed"|"vts-tradefed"|"mts-tradefed"'
+
+          # Cari Android.bp yang match pattern tsb
+          # Skip hardware/interfaces/camera/* — itu target build kita!
+          BROKEN_FILES=$(grep -rlE "$PATTERNS" --include="Android.bp" \
+            --exclude-dir=".repo" \
+            --exclude-dir="hardware/interfaces/camera" \
+            . 2>/dev/null || true)
+
+          COUNT=$(echo "$BROKEN_FILES" | grep -c '.' || echo 0)
+          echo "Total Android.bp dengan reference broken: $COUNT"
+
+          if [ -z "$BROKEN_FILES" ] || [ "$COUNT" -eq 0 ]; then
+            echo "Tidak ada file Android.bp broken — skip strip"
+            exit 0
+          fi
+
+          echo ""
+          echo "=== Daftar Android.bp yang akan di-strip (sample 30) ==="
+          echo "$BROKEN_FILES" | head -30
+          echo "..."
+
+          echo ""
+          echo "=== Stripping (rename ke .bp.disabled supaya soong skip) ==="
+          STRIPPED=0
+          for f in $BROKEN_FILES; do
+            # Safety: pastikan file ini bukan deps camera HAL
+            if echo "$f" | grep -qE "hardware/interfaces/camera|hardware/libhardware/include/hardware/camera"; then
+              echo "  SKIP (camera HAL deps): $f"
+              continue
+            fi
+            mv "$f" "${f}.disabled"
+            STRIPPED=$((STRIPPED+1))
+          done
+          echo ""
+          echo "Total stripped: $STRIPPED"
+          echo "(Soong akan skip directory tanpa Android.bp)"
+
+          echo ""
+          echo "=== Konfirmasi camera HAL Android.bp masih ada ==="
+          ls -la hardware/interfaces/camera/provider/default/Android.bp
+          ls -la hardware/interfaces/camera/device/default/Android.bp
 
       # ---------- Step 8b: Diagnose hardware tree ----------
       - name: Diagnose hardware tree (BEFORE Verify)
