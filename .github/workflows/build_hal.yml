@@ -1,25 +1,23 @@
-name: Build External Camera HAL (AIDL V1) — v9.1
+name: Build External Camera HAL (AIDL V1) — v9.2
 
 # ============================================================================
-# Phase 4A v9.1 — VCam Project (Santuyajah)
+# Phase 4A v9.2 — VCam Project (Santuyajah)
 # Target: android.hardware.camera.provider-V1-external-service (arm64)
 # Plus:   android.hardware.camera.provider-V1-external-impl.so
 #         camera.device-external-impl.so
 #
-# Perubahan v9.1 vs v9:
-#   - v9 fail karena local_manifest reference project yang tidak ada di branch
-#     android16-qpr2-release (e.g. platform/external/llvm-project sudah pindah)
-#     -> seluruh parse manifest fatal -> 0 byte output.
-#   - Fix: local_manifest minimal saja (cuma cts, dengan optional="true").
-#   - Size cap dipindah ke post-sync rm -rf (di Step 8).
+# Perubahan v9.2 vs v9.1:
+#   - v9.1 auto-fallback BERHASIL: tanpa -g filter dapat 1010 project (vs
+#     22 project dengan -g all,-notdefault,-pdk,...). Kesimpulan: di branch
+#     android16-qpr2-release, sistem group sudah berbeda total dari AOSP
+#     versi lama. Bahkan tag "all" tidak match ke ~99% project.
+#   - Solusi: buang -g filter sama sekali sebagai default (tidak perlu
+#     auto-fallback path). Validation step jadi single-shot, lebih cepat.
+#   - Aggressive post-sync cleanup tetap ada untuk imbangi sync lebih besar.
 #
-# Perubahan v9 vs v8:
-#   - Ganti -g default,-pdk,... menjadi -g all,-notdefault,-pdk,... 
-#     (default terlalu agresif di android16-qpr2-release: hanya 22 project
-#      ke-include, hardware/interfaces missing). 
-#     "all"  = match SEMUA project terlepas group apa
-#     "-notdefault" = exclude project yang explicit notdefault (langka)
-#   - Pre-sync validation auto-fallback re-init tanpa -g kalau masih missing
+# Perubahan v9.1 vs v9:
+#   - Fix local_manifest non-existent project crash (optional="true")
+#   - Size cap dipindah ke post-sync rm -rf
 # ============================================================================
 
 on:
@@ -158,21 +156,21 @@ jobs:
           HOME=/mnt/aosp/home git config --global color.ui false
           HOME=/mnt/aosp/home git config --global pack.threads 2
 
-      # ---------- Step 5: Repo init (v9: -g all bukan -g default) ----------
-      - name: Repo init (with -g all,-notdefault,-pdk,...)
+      # ---------- Step 5: Repo init (v9.2: no -g filter, terbukti perlu di android16) ----------
+      - name: Repo init (no group filter)
         working-directory: /mnt/aosp
         run: |
-          # v9 KEY FIX: pakai "all" bukan "default".
-          # "all" = match SEMUA project apapun groupnya.
-          # "default" = hanya match project yang explicitly tagged groups="default"
-          #             (di android16-qpr2-release ini cuma ~22 project, missing
-          #              platform/hardware/interfaces).
-          # "-notdefault" = exclude project yang explicit ada di group "notdefault"
-          #                 (project yang sengaja dimatikan secara default upstream)
+          # v9.2 KEY FINDING (dari run v9.1):
+          #   -g default        -> 22 projects (FAIL: hardware/interfaces missing)
+          #   -g all,-notdefault -> 22 projects (FAIL: SAMA SEPERTI default)
+          #   tanpa -g          -> 1010 projects (OK: hardware/interfaces ADA)
+          # Kesimpulan: di branch android16-qpr2-release, sistem group sudah
+          # berbeda total. Bahkan tag "all" tidak match. Solusi: skip -g.
+          # Trade-off: sync lebih besar (~30-50GB extra). Kompensasi via
+          # aggressive rm -rf post-sync (Step 8).
           /mnt/aosp/bin/repo init \
             -u https://android.googlesource.com/platform/manifest \
             -b ${{ github.event.inputs.aosp_branch }} \
-            -g all,-notdefault,-pdk,-pdk-cw,-pdk-fs,-cts,-vts,-tests \
             --depth=1 --no-tags --no-clone-bundle
 
       # ---------- Step 6: Local manifest (v9.1: minimal + optional="true") ----------
@@ -196,59 +194,46 @@ jobs:
           EOF
           cat .repo/local_manifests/skip_safe.xml
 
-      # ---------- Step 6b: Pre-sync manifest validation (v9: dengan auto-fallback) ----------
-      - name: Pre-sync manifest validation (with auto-fallback)
+      # ---------- Step 6b: Pre-sync manifest validation (v9.2: single-shot) ----------
+      - name: Pre-sync manifest validation
         working-directory: /mnt/aosp
         run: |
           mkdir -p /mnt/aosp/logs
-
-          validate_manifest() {
-            local label="$1"
-            local outfile="$2"
-            echo "=== Dump manifest [$label] ==="
-            /mnt/aosp/bin/repo manifest -o "$outfile"
-            local size=$(stat -c%s "$outfile")
-            echo "$outfile size: ${size} bytes"
-            echo ""
-            echo "=== Cek apakah platform/hardware/interfaces ada di manifest [$label] ==="
-            if grep -q 'name="platform/hardware/interfaces"' "$outfile"; then
-              echo "OK [$label]: platform/hardware/interfaces TERMASUK"
-              return 0
-            else
-              echo "FAIL [$label]: platform/hardware/interfaces TIDAK ADA"
-              return 1
-            fi
-          }
-
-          # Coba 1: dengan -g all,-notdefault,-pdk,... (config v9 default)
-          if validate_manifest "v9-all-filter" /mnt/aosp/logs/manifest_dump.xml; then
-            echo "=== Validation PASSED dengan group filter v9 ==="
-          else
-            echo ""
-            echo "=== Group filter v9 masih memotong hardware/interfaces ==="
-            echo "=== Auto-fallback: re-init tanpa -g filter sama sekali ==="
-            /mnt/aosp/bin/repo init \
-              -u https://android.googlesource.com/platform/manifest \
-              -b ${{ github.event.inputs.aosp_branch }} \
-              --depth=1 --no-tags --no-clone-bundle
-            if validate_manifest "v9-fallback-no-filter" /mnt/aosp/logs/manifest_dump.xml; then
-              echo "=== Fallback PASSED tanpa group filter ==="
-              echo "PERINGATAN: tanpa filter, sync akan lebih besar ~30-50GB extra"
-            else
-              echo ""
-              echo "=== FATAL: bahkan tanpa filter, hardware/interfaces tidak ada ==="
-              echo "=== List semua project (sample 100) ==="
-              grep -oE 'name="[^"]+"' /mnt/aosp/logs/manifest_dump.xml | head -100
-              exit 1
-            fi
+          echo "=== Dump manifest ==="
+          /mnt/aosp/bin/repo manifest -o /mnt/aosp/logs/manifest_dump.xml
+          SIZE=$(stat -c%s /mnt/aosp/logs/manifest_dump.xml)
+          echo "manifest_dump.xml size: ${SIZE} bytes"
+          
+          if [ "$SIZE" -lt 50000 ]; then
+            echo "WARNING: manifest size suspiciously small (${SIZE} bytes)"
+            echo "Expected: ~99000+ bytes for android16-qpr2-release without -g filter"
           fi
-
+          
           echo ""
-          echo "=== List semua project hardware/* di manifest final ==="
+          echo "=== Cek apakah platform/hardware/interfaces ada di manifest ==="
+          if grep -q 'name="platform/hardware/interfaces"' /mnt/aosp/logs/manifest_dump.xml; then
+            echo "OK: platform/hardware/interfaces TERMASUK"
+          else
+            echo "FATAL: platform/hardware/interfaces TIDAK ADA"
+            echo ""
+            echo "=== List semua project (sample 100) ==="
+            grep -oE 'name="[^"]+"' /mnt/aosp/logs/manifest_dump.xml | head -100
+            exit 1
+          fi
+          
+          echo ""
+          echo "=== List semua project hardware/* di manifest ==="
           grep -oE 'name="platform/hardware/[^"]+"' /mnt/aosp/logs/manifest_dump.xml | sort -u | head -50
+          
           echo ""
           echo "=== Total project di manifest ==="
-          grep -c '<project ' /mnt/aosp/logs/manifest_dump.xml || true
+          PROJ_COUNT=$(grep -c '<project ' /mnt/aosp/logs/manifest_dump.xml || echo 0)
+          echo "Total: $PROJ_COUNT projects"
+          if [ "$PROJ_COUNT" -lt 100 ]; then
+            echo "FATAL: project count terlalu sedikit ($PROJ_COUNT). Expected: ~1000+"
+            exit 1
+          fi
+          echo "PASSED: project count OK"
 
       # ---------- Step 7a: Memory monitor ----------
       - name: Start memory monitor
