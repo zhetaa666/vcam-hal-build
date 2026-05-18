@@ -179,8 +179,10 @@ jobs:
         working-directory: /mnt/aosp
         run: |
           mkdir -p /mnt/aosp/logs
-          echo "=== Dump manifest yang sudah di-resolve (post-group-filter) ==="
-          /mnt/aosp/bin/repo manifest -r -o /mnt/aosp/logs/manifest_dump.xml
+          echo "=== Dump manifest (tanpa -r, karena project belum ke-sync) ==="
+          # PENTING: JANGAN pakai -r di sini. -r minta git rev-parse HEAD di tiap
+          # project folder, padahal sync belum jalan -> FileNotFoundError.
+          /mnt/aosp/bin/repo manifest -o /mnt/aosp/logs/manifest_dump.xml
           echo "manifest_dump.xml size: $(stat -c%s /mnt/aosp/logs/manifest_dump.xml) bytes"
           echo ""
           echo "=== Cek apakah platform/hardware/interfaces ada di manifest ==="
