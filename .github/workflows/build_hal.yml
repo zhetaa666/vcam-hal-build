@@ -1,4 +1,4 @@
-name: Build External Camera HAL (AIDL V1) — v9.3
+name: Build External Camera HAL (AIDL V1) — v9.4
 
 # ============================================================================
 # Phase 4A v9.3 — VCam Project (Santuyajah)
@@ -231,9 +231,11 @@ jobs:
             <remove-project name="platform/external/swift" optional="true"/>
             <remove-project name="platform/external/dart" optional="true"/>
 
-            <!-- ===== TIER 3: VNDK legacy (~15GB) — Android 16 sudah deprecate VNDK ===== -->
+            <!-- ===== TIER 3: VNDK legacy (~12GB) — Android 16 sudah deprecate VNDK ===== -->
+            <!-- v9.4 FIX: KEMBALIKAN vndk/v31 — lunch aosp_arm64-trunk_staging-userdebug
+                 butuh VNDK v31 untuk compat check. Tanpa ini: "VNDK version 31 not found" -->
             <remove-project name="platform/prebuilts/vndk/v30" optional="true"/>
-            <remove-project name="platform/prebuilts/vndk/v31" optional="true"/>
+            <!-- KEEP: platform/prebuilts/vndk/v31 — dibutuhkan lunch target -->
             <remove-project name="platform/prebuilts/vndk/v32" optional="true"/>
             <remove-project name="platform/prebuilts/vndk/v33" optional="true"/>
             <remove-project name="platform/prebuilts/vndk/v34" optional="true"/>
