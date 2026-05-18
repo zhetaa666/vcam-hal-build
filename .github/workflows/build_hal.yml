@@ -1,33 +1,26 @@
-name: Build External Camera HAL (AIDL V1) — v9.4
+name: Build External Camera HAL (AIDL V1) — v9.5
 
 # ============================================================================
-# Phase 4A v9.3 — VCam Project (Santuyajah)
+# Phase 4A v9.5 — VCam Project (Santuyajah)
 # Target: android.hardware.camera.provider-V1-external-service (arm64)
-# Plus:   android.hardware.camera.provider-V1-external-impl.so
-#         camera.device-external-impl.so
+#
+# Perubahan v9.5 vs v9.4:
+#   - v9.3 prune SEMUA vndk -> "VNDK 31 not found"
+#   - v9.4 kembalikan vndk/v31 saja -> "VNDK 32 not found"
+#   LESSON LEARNED: lunch aosp_arm64-trunk_staging-userdebug iterasi
+#   cek SEMUA VNDK di PRODUCT_EXTRA_VNDK_VERSIONS=[30..35]. Selektif
+#   tidak bisa, harus KEEP ALL VNDK.
+#   - v9.5 keep all VNDK (cost +15GB), kompensasi:
+#     * Disable ccache (hemat 8GB)
+#     * Tambah TIER 8 prune: darwin prebuilts, kernel binaries,
+#       Settings/SystemUI/Launcher apps, grpc/tensorflow (~10GB)
+#   - Trade-off: build pertama ~2.5 jam (vs ~2 jam dengan ccache)
+#
+# Perubahan v9.4 vs v9.3:
+#   - Kembalikan vndk/v31 (kurang masih untuk lunch target)
 #
 # Perubahan v9.3 vs v9.2:
-#   - v9.1 sync GAGAL di attempt 1 dengan "No space left on device":
-#       /dev/mapper/buildvg-buildlv  101G  101G  12K 100% /mnt/aosp
-#     Tanpa -g filter, sync 1010 project = ~99GB. Masih perlu 50GB
-#     untuk build output + 8GB ccache + temp = total ~157GB.
-#     GHA runner max 101GB -> kurang 56GB.
-#   - Solusi v9.3: aggressive prune via local_manifest dengan
-#     optional="true" (sudah terbukti aman di v9.1).
-#     Target prune: ~60GB project yang pasti tidak dipakai camera HAL
-#     (rust toolchain, VNDK legacy, llvm source, chromium, dll).
-#   - JANGAN HAPUS: system/core, system/libhidl, system/libfmq,
-#     frameworks/av, frameworks/native, hardware/libhardware,
-#     external/jpeg-turbo, external/libyuv, external/tinyxml2,
-#     bionic, prebuilts/clang, build/* (camera HAL deps)
-#
-# Perubahan v9.2 vs v9.1:
-#   - Skip -g filter sebagai default (terbukti perlu di android16)
-#   - Validation step single-shot
-#
-# Perubahan v9.1 vs v9:
-#   - Fix local_manifest non-existent project crash (optional="true")
-#   - Size cap dipindah ke post-sync rm -rf
+#   - Aggressive prune ~60GB via local_manifest dengan optional="true"
 # ============================================================================
 
 on:
@@ -231,15 +224,13 @@ jobs:
             <remove-project name="platform/external/swift" optional="true"/>
             <remove-project name="platform/external/dart" optional="true"/>
 
-            <!-- ===== TIER 3: VNDK legacy (~12GB) — Android 16 sudah deprecate VNDK ===== -->
-            <!-- v9.4 FIX: KEMBALIKAN vndk/v31 — lunch aosp_arm64-trunk_staging-userdebug
-                 butuh VNDK v31 untuk compat check. Tanpa ini: "VNDK version 31 not found" -->
-            <remove-project name="platform/prebuilts/vndk/v30" optional="true"/>
-            <!-- KEEP: platform/prebuilts/vndk/v31 — dibutuhkan lunch target -->
-            <remove-project name="platform/prebuilts/vndk/v32" optional="true"/>
-            <remove-project name="platform/prebuilts/vndk/v33" optional="true"/>
-            <remove-project name="platform/prebuilts/vndk/v34" optional="true"/>
-            <remove-project name="platform/prebuilts/vndk/v35" optional="true"/>
+            <!-- ===== TIER 3: VNDK — KEEP ALL (v9.5 lesson learned) ===== -->
+            <!-- v9.4 FIX KEMBALIKAN v31 -> error "VNDK 32 not found"
+                 v9.5 LESSON: lunch target cek SEMUA VNDK versions di
+                   PRODUCT_EXTRA_VNDK_VERSIONS=[30,31,32,33,34,35]
+                 Kalau salah satu missing, fail. Solusi: KEEP ALL VNDK.
+                 Total cost: ~15GB. Kompensasi via darwin prune + disable ccache. -->
+            <!-- KEEP: platform/prebuilts/vndk/v30 sd v35 -->
             <remove-project name="platform/prebuilts/abi-dumps" optional="true"/>
             <remove-project name="platform/prebuilts/abi-dumps/ndk" optional="true"/>
             <remove-project name="platform/prebuilts/abi-dumps/platform" optional="true"/>
@@ -287,6 +278,31 @@ jobs:
             <remove-project name="platform/external/skqp" optional="true"/>
             <remove-project name="platform/frameworks/wilhelm" optional="true"/>
             <remove-project name="platform/frameworks/opt/photoviewer" optional="true"/>
+
+            <!-- ===== TIER 8 (v9.5): Extra prune ~10GB untuk kompensasi VNDK kembali ===== -->
+            <!-- Darwin prebuilts: kita build di linux-x86_64, darwin tidak dipakai -->
+            <remove-project name="platform/prebuilts/clang-darwin" optional="true"/>
+            <remove-project name="platform/prebuilts/build-tools-darwin" optional="true"/>
+            <remove-project name="platform/prebuilts/python-darwin" optional="true"/>
+            <remove-project name="platform/prebuilts/go/darwin-x86" optional="true"/>
+            <!-- Kernel binaries: kita tidak build kernel di sini, kernel sudah ada di HP -->
+            <remove-project name="platform/prebuilts/kernel/x86_64" optional="true"/>
+            <remove-project name="platform/prebuilts/kernel/arm64" optional="true"/>
+            <!-- Extra apps non-essential -->
+            <remove-project name="platform/packages/apps/Contacts" optional="true"/>
+            <remove-project name="platform/packages/apps/Dialer" optional="true"/>
+            <remove-project name="platform/packages/apps/TV" optional="true"/>
+            <remove-project name="platform/packages/apps/CarrierConfig" optional="true"/>
+            <remove-project name="platform/packages/apps/UniversalMediaPlayer" optional="true"/>
+            <remove-project name="platform/packages/apps/Settings" optional="true"/>
+            <remove-project name="platform/packages/apps/SystemUI" optional="true"/>
+            <remove-project name="platform/packages/apps/Launcher3" optional="true"/>
+            <!-- Extra non-essential externals (verified safe for camera HAL):
+                 NOTE: TIDAK PRUNE icu/boringssl/conscrypt — transitive deps via libbase -->
+            <remove-project name="platform/external/grpc-grpc" optional="true"/>
+            <remove-project name="platform/external/grpc-grpc-java" optional="true"/>
+            <remove-project name="platform/external/tensorflow" optional="true"/>
+            <remove-project name="platform/external/sonivox" optional="true"/>
           </manifest>
           EOF
           echo "=== Local manifest content ==="
@@ -607,7 +623,7 @@ jobs:
           echo ""
           echo "=== Verify SUKSES ==="
 
-      # ---------- Step 9: Build ----------
+      # ---------- Step 9: Build (v9.5: ccache disabled untuk hemat 8GB) ----------
       - name: Build external camera HAL
         working-directory: /mnt/aosp
         run: |
@@ -615,10 +631,13 @@ jobs:
           set -o pipefail
           source build/envsetup.sh
           lunch ${{ github.event.inputs.build_variant }}
-          export USE_CCACHE=1
-          export CCACHE_DIR=/mnt/aosp/ccache
-          ccache -M 8G
-          ccache -z
+          # v9.5: ccache DISABLED untuk hemat 8GB disk
+          # Trade-off: build pertama lebih lambat (~2.5 jam vs ~2 jam)
+          # tapi free 8GB extra space untuk out/ artifact
+          export USE_CCACHE=0
+          # Free space monitoring
+          echo "=== Disk before build ==="
+          df -h /mnt/aosp
 
           m -j$(nproc) \
             android.hardware.camera.provider-V1-external-service \
@@ -626,7 +645,8 @@ jobs:
             camera.device-external-impl \
             2>&1 | tee /mnt/aosp/build.log
 
-          ccache -s
+          echo "=== Disk after build ==="
+          df -h /mnt/aosp
 
       # ---------- Step 10: Collect ----------
       - name: Collect artifacts
