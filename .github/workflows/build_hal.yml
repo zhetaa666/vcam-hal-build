@@ -1,21 +1,32 @@
-name: Build External Camera HAL (AIDL V1) — v9.7
+name: Build External Camera HAL (AIDL V1) — v9.8
 
 # ============================================================================
-# Phase 4A v9.7 — VCam Project (Santuyajah)
+# Phase 4A v9.8 — VCam Project (Santuyajah)
 # Target: android.hardware.camera.provider-V1-external-service (arm64)
 #
-# Perubahan v9.7 vs v9.6:
-#   - v9.6 lulus prune llvm_tblgen tapi gagal di soong bootstrap dengan
-#     5+ error reference broken: cts_defaults, mts-target-sdk-version-current.
-#   - Pola: setiap kita prune project test, ada Android.bp di module lain
-#     yang reference simbol yang hilang. Whack-a-mole game tidak akan selesai.
-#   - Solusi v9.7: tambah Step 8a yang scan SEMUA Android.bp untuk reference
-#     broken (cts_defaults/mts-*/vts-*/llvm_tblgen/rs_defaults), lalu rename
-#     file Android.bp tsb ke .bp.disabled. Soong skip directory tanpa Android.bp.
-#     Camera HAL Android.bp tetap dipertahankan (eksplisit di-skip).
+# Perubahan v9.8 vs v9.7:
+#   - v9.7 PATTERNS list statis (cts_defaults/mts_defaults/llvm_tblgen/...)
+#     tidak cover semua. v9.7 fail dengan 3 error baru:
+#       compatibility_test_suite_package, test_suite_package
+#   - Pola: setiap kita tambah pattern, ada simbol baru yang muncul.
+#     Solusi: pendekatan ITERATIF self-healing.
 #
-# Perubahan v9.6 vs v9.5:
-#   - Prune RenderScript chain (mclinker, slang, libbcc, frameworks/rs)
+# v9.8 strategi:
+#   PHASE 1: Initial strip dengan PATTERNS expanded (cover semua yang kita tahu)
+#   PHASE 2: Loop max 10x:
+#     - Run "m nothing" untuk capture error message
+#     - Parse error -> dapat list Android.bp file path
+#     - Rename file tsb ke .bp.disabled
+#     - Ulangi sampai bootstrap PASS atau tidak ada Android.bp baru untuk strip
+#   PHASE 3: Konfirmasi camera HAL Android.bp masih utuh
+#
+# Manfaat:
+#   - Self-healing: tidak perlu update PATTERNS list manual lagi
+#   - Aman: camera HAL Android.bp eksplisit di-skip dari rename
+#   - Diagnostic: setiap iterasi menyimpan error log
+#
+# Perubahan v9.7 vs v9.6:
+#   - Static PATTERNS-based scrubber (sudah dilewati v9.8 yang lebih general)
 # ============================================================================
 
 on:
@@ -490,69 +501,116 @@ jobs:
           du -sh . 2>/dev/null | tail -1
           df -h /mnt/aosp
 
-      # ---------- Step 8a (NEW v9.7): Strip Android.bp dengan reference broken ----------
+      # ---------- Step 8a (v9.8): Iterative broken-bp scrubber ----------
       # Strategi:
-      #   Daripada whack-a-mole prune project per project, scan semua Android.bp
-      #   yang masih reference simbol yang sudah hilang (cts_defaults,
-      #   mts-target-sdk-version-current, llvm_tblgen, dll), lalu HAPUS file
-      #   Android.bp tersebut. Project-nya tetap ada, hanya build manifest
-      #   untuk file tersebut yang dihilangkan.
-      # 
-      #   Camera HAL TIDAK butuh modul test/CTS/MTS apapun. Aman.
-      # 
-      # Symbol yang dihapus (terkait test yang sudah di-prune):
-      #   - cts_defaults              (dari platform/cts)
-      #   - mts_defaults / mts-*      (dari platform/test/mts)
-      #   - vts_defaults / vts-*      (dari platform/test/vts)
-      #   - llvm_tblgen / llvm_*      (dari platform/external/llvm-project)
-      #   - rs_defaults               (dari platform/frameworks/rs)
-      - name: Strip broken Android.bp (reference pruned modules)
+      #   v9.7 pakai PATTERNS list statis -> tidak cover semua simbol broken
+      #   (compatibility_test_suite_package, test_suite_package, dll).
+      #
+      # v9.8 pendekatan ITERATIF self-healing:
+      #   1. Initial pass: rename Android.bp dengan PATTERNS yang kita tahu
+      #   2. Loop sampai max 10 iterasi:
+      #      a. Coba soong bootstrap (cuma untuk capture errors, tidak full build)
+      #      b. Parse error message untuk file path Android.bp
+      #      c. Rename semua file yang error ke .bp.disabled
+      #      d. Ulangi sampai bootstrap pass atau max iterasi
+      #   3. Camera HAL Android.bp eksplisit DI-LINDUNGI dari rename
+      - name: Iterative broken-bp scrubber (v9.8)
         working-directory: /mnt/aosp
         run: |
-          echo "=== Scanning Android.bp dengan reference broken modules ==="
-          # Pattern broken: simbol yang dipakai di defaults / dependencies
-          PATTERNS='"cts_defaults"|"mts_defaults"|"mts-target-sdk-version-current"|"vts_defaults"|"llvm_tblgen"|"rs_defaults"|"cts-tradefed"|"vts-tradefed"|"mts-tradefed"'
+          # ===== Initial pass: rename Android.bp dengan pattern yang kita tahu =====
+          echo "=========================================================="
+          echo " PHASE 1: Initial strip via known PATTERNS"
+          echo "=========================================================="
+          # Expanded pattern: cover semua *_defaults dan *_test_suite_package
+          PATTERNS='"cts_defaults"|"mts_defaults"|"vts_defaults"|"sts_defaults"|"rs_defaults"|"mts-target-sdk-version-current"|"llvm_tblgen"|"cts-tradefed"|"vts-tradefed"|"mts-tradefed"|"compatibility_test_suite_package"|"test_suite_package"|"csuite-tradefed"|"catbox-tradefed"'
 
-          # Cari Android.bp yang match pattern tsb
-          # Skip hardware/interfaces/camera/* — itu target build kita!
           BROKEN_FILES=$(grep -rlE "$PATTERNS" --include="Android.bp" \
             --exclude-dir=".repo" \
             --exclude-dir="hardware/interfaces/camera" \
             . 2>/dev/null || true)
 
-          COUNT=$(echo "$BROKEN_FILES" | grep -c '.' || echo 0)
-          echo "Total Android.bp dengan reference broken: $COUNT"
-
-          if [ -z "$BROKEN_FILES" ] || [ "$COUNT" -eq 0 ]; then
-            echo "Tidak ada file Android.bp broken — skip strip"
-            exit 0
-          fi
-
-          echo ""
-          echo "=== Daftar Android.bp yang akan di-strip (sample 30) ==="
-          echo "$BROKEN_FILES" | head -30
-          echo "..."
-
-          echo ""
-          echo "=== Stripping (rename ke .bp.disabled supaya soong skip) ==="
-          STRIPPED=0
+          INITIAL_COUNT=0
           for f in $BROKEN_FILES; do
-            # Safety: pastikan file ini bukan deps camera HAL
             if echo "$f" | grep -qE "hardware/interfaces/camera|hardware/libhardware/include/hardware/camera"; then
-              echo "  SKIP (camera HAL deps): $f"
               continue
             fi
             mv "$f" "${f}.disabled"
-            STRIPPED=$((STRIPPED+1))
+            INITIAL_COUNT=$((INITIAL_COUNT+1))
           done
+          echo "Initial pass: $INITIAL_COUNT Android.bp di-disabled"
+
+          # ===== Iterative phase: try bootstrap, parse errors, rename, retry =====
           echo ""
-          echo "Total stripped: $STRIPPED"
-          echo "(Soong akan skip directory tanpa Android.bp)"
+          echo "=========================================================="
+          echo " PHASE 2: Iterative bootstrap-and-fix"
+          echo "=========================================================="
+          source build/envsetup.sh
+          lunch ${{ github.event.inputs.build_variant }}
+          export USE_CCACHE=0
+
+          MAX_ITER=10
+          for iter in $(seq 1 $MAX_ITER); do
+            echo ""
+            echo ">>>>> Iteration $iter / $MAX_ITER <<<<<"
+
+            # Coba bootstrap (cuma sampai analyzing, kita capture error)
+            ERR_LOG=/mnt/aosp/logs/bootstrap_err_${iter}.log
+            mkdir -p /mnt/aosp/logs
+
+            # Run soong analysis only (tidak compile)
+            # m nothing = jalankan soong bootstrap saja, tanpa build apapun
+            timeout 600 m nothing 2>&1 | tee "$ERR_LOG" | tail -100 || true
+
+            # Parse error untuk dapat list Android.bp yang error
+            # Format: "error: path/to/Android.bp:NN:1: ..."
+            BAD_BP=$(grep -oE 'error:\s+([a-zA-Z0-9_/.-]+/Android\.bp):' "$ERR_LOG" | \
+                     sed -E 's/error:\s+//;s/:$//' | sort -u || true)
+
+            if [ -z "$BAD_BP" ]; then
+              # Cek juga apakah bootstrap sukses
+              if grep -q "soong bootstrap failed" "$ERR_LOG"; then
+                echo "Bootstrap masih fail tapi tidak ada error Android.bp yang bisa di-strip."
+                echo "=== Tail of bootstrap_err_${iter}.log ==="
+                tail -50 "$ERR_LOG"
+                break
+              fi
+              echo "✓ Bootstrap PASS — tidak ada Android.bp yang error lagi!"
+              break
+            fi
+
+            # Rename setiap Android.bp yang error
+            BP_COUNT=0
+            for bp in $BAD_BP; do
+              if [ ! -f "$bp" ]; then
+                continue
+              fi
+              # Safety check: never disable camera HAL
+              if echo "$bp" | grep -qE "hardware/interfaces/camera|hardware/libhardware/include/hardware/camera"; then
+                echo "  CRITICAL SAFETY HIT (refuse to disable): $bp"
+                continue
+              fi
+              echo "  Disabling: $bp"
+              mv "$bp" "${bp}.disabled"
+              BP_COUNT=$((BP_COUNT+1))
+            done
+            echo "Iteration $iter: disabled $BP_COUNT Android.bp"
+
+            if [ "$BP_COUNT" -eq 0 ]; then
+              echo "Tidak ada file baru untuk di-disable, stop iterasi."
+              break
+            fi
+          done
 
           echo ""
+          echo "=========================================================="
+          echo " PHASE 3: Final verification"
+          echo "=========================================================="
           echo "=== Konfirmasi camera HAL Android.bp masih ada ==="
           ls -la hardware/interfaces/camera/provider/default/Android.bp
           ls -la hardware/interfaces/camera/device/default/Android.bp
+          echo ""
+          echo "=== Total Android.bp.disabled yang dibuat ==="
+          find . -name "Android.bp.disabled" -not -path "./.repo/*" 2>/dev/null | wc -l
 
       # ---------- Step 8b: Diagnose hardware tree ----------
       - name: Diagnose hardware tree (BEFORE Verify)
@@ -658,6 +716,7 @@ jobs:
             /mnt/aosp/logs/repo_list.txt
             /mnt/aosp/logs/repo_list_hardware.txt
             /mnt/aosp/logs/monitor.log
+            /mnt/aosp/logs/bootstrap_err_*.log
           retention-days: 14
           if-no-files-found: warn
 
