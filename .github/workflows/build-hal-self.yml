@@ -1,10 +1,11 @@
-name: Build External Camera HAL (AIDL V1) v10.3 (Self-Hosted + Anti-OOM)
+name: Build External Camera HAL (AIDL V1) v10.4 (Self-Hosted + Anti-OOM Tweaks)
 
 # ============================================================================
-# Phase 7 - Self Hosted VPS Edition (160GB)
-# - Swap Memory 24GB untuk mencegah OOM (Killed)
+# Phase 8 - Self Hosted VPS Edition (Sisa Disk 40GB)
+# - Swap Memory 24GB (Aman untuk sisa SSD)
 # - Preemptive nuke untuk LLVM, Skia, dan Trusty (Rust deps)
 # - CCache aktif untuk resume build lebih cepat
+# - Soong Memory Tweaks (GOGC, GOMEMLIMIT, GOMAXPROCS) agar tidak KILLED
 # ============================================================================
 
 on:
@@ -22,7 +23,7 @@ on:
 jobs:
   build:
     name: Build External Camera HAL (Self-Hosted)
-    runs-on: ubuntu-22.04
+    runs-on: self-hosted
     timeout-minutes: 600
 
     env:
@@ -41,22 +42,20 @@ jobs:
           sudo chown -R $USER:$USER /mnt/aosp
           df -h /mnt/aosp
 
-      # ---------- Step 1b: SETUP SWAP MEMORY (ANTI "Killed" / OOM) ----------
+      # ---------- Step 1b: SETUP SWAP MEMORY (24GB - Aman untuk sisa disk 40GB) ----------
       - name: Setup 24GB Swap Space
         run: |
-          echo "Mengecek ketersediaan Swap..."
-          SWAP_SIZE=$(free -m | awk '/^Swap:/ {print $2}')
-          if [ "$SWAP_SIZE" -lt 20000 ]; then
-            echo "Swap kurang dari 20GB. Membuat file swap 24GB..."
-            sudo swapoff -a || true
-            sudo fallocate -l 24G /swapfile || sudo dd if=/dev/zero of=/swapfile bs=1M count=24576
-            sudo chmod 600 /swapfile
-            sudo mkswap /swapfile
-            sudo swapon /swapfile
-            echo "Swap 24GB berhasil diaktifkan!"
-          else
-            echo "Swap sudah memadai ($SWAP_SIZE MB)."
-          fi
+          echo "Mematikan swap lama jika ada..."
+          sudo swapoff -a || true
+          sudo rm -f /swapfile || true
+          
+          echo "Membuat file swap 24GB yang aman untuk disk..."
+          sudo fallocate -l 24G /swapfile || sudo dd if=/dev/zero of=/swapfile bs=1M count=24576
+          sudo chmod 600 /swapfile
+          sudo mkswap /swapfile
+          sudo swapon /swapfile
+          
+          echo "Swap 24GB berhasil diaktifkan!"
           free -h
 
       # ---------- Step 2: Setup HOME & repo tool ----------
@@ -178,7 +177,16 @@ jobs:
           export USE_CCACHE=1
           export CCACHE_EXEC=/usr/bin/ccache
           export ALLOW_MISSING_DEPENDENCIES=true
-          export GOGC=50
+          
+          # ==========================================
+          # ANTI-OOM SOONG TWEAKS (WAJIB UNTUK RAM 8GB)
+          # ==========================================
+          # 1. Paksa sistem membuang "sampah" memori lebih cepat
+          export GOGC=20 
+          # 2. Batasi pemakaian memori murni Soong maksimal ~6GB
+          export GOMEMLIMIT=6144MiB 
+          # 3. Batasi CPU agar proses pembacaan file tidak terjadi serentak
+          export GOMAXPROCS=2
 
           m -j$(nproc) \
             android.hardware.camera.provider-V1-external-service \
