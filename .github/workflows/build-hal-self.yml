@@ -1,30 +1,47 @@
-name: Build External Camera HAL (AIDL V1) v10.1 Self-Hosted Resumable
+name: Build External Camera HAL (AIDL V1) v10.2 Self-Hosted Resumable
 
 # ============================================================================
-# Phase 4A v10.1 - VCam Project (Santuyajah) - SELF-HOSTED VPS 160GB
+# Phase 4A v10.2 - VCam Project (Santuyajah) - SELF-HOSTED VPS 160GB
 #
-# Tujuan utama dibanding v9.10 / Self.yml lama:
-#   1) runs-on: self-hosted (jalan di VPS sendiri, bukan GitHub-hosted)
-#      - Tidak perlu lagi LVM/maximize-build-space/free-disk-space
-#      - Tidak ada batas 101GB
-#   2) RESUMABLE / IDEMPOTENT
-#      - Setiap step besar nulis sentinel di /mnt/aosp/.state/<step>.done
-#      - Kalau rerun, step yang sudah done akan SKIP
-#      - File source AOSP, ccache, out/ semuanya persist di VPS
-#      - Kalau build step 'Build external camera HAL' gagal di tengah,
-#        rerun cukup ulangi step itu (incremental m + ccache)
-#   3) Fix error sebelumnya (soong bootstrap fail karena missing modules):
-#        - "skia_deps"     -> tools/security/fuzzing/orphans/libskia
-#        - "cts_defaults"  -> tools/platform-compat/java/android/compat/testing/app
-#        - "connectivity-mainline-presubmit-cc-defaults"
-#                          -> packages/modules/Connectivity/bpf/tests/mts
-#      Ditangani dengan: (a) explicit preemptive nuke folder-folder itu,
-#      (b) scrubber iteratif (regex diperluas: /testing/, /orphans/, /fuzzers?/).
+# DIFF vs v10.1:
+#   v10.1 motong terlalu agresif. Errornya:
+#     - cts_support_defaults missing -> NFC tests
+#     - rust_static_cc_lib_defaults missing -> external/rust/cxx
+#         (kita prune prebuilts/rust, jadi defaults ini hilang)
+#     - ConnectivityNextEnableDefaults missing -> Tethering
+#         (kita rm -rf Connectivity/Tethering/apex; ini CORE bukan test!)
+#     - NetworkStackApiShimSettingsForCurrentBranch missing
+#         (chain dari Tethering yg dirusak)
 #
-# Inputs tambahan vs lama:
-#   - force_resync     : 'true' = sync ulang AOSP, 'false' = skip kalau sudah sync
-#   - force_clean_out  : 'true' = hapus out/ sebelum build (clean build)
-#   - skip_scrubber    : 'true' = skip scrubber (kalau workspace sudah scrubbed)
+# Strategi v10.2 (160GB VPS, longgar):
+#   1. PRUNE MINIMAL di local_manifests: hanya yang jelas tidak relevan & besar
+#      - cts/mts/vts/sts test suites (ratusan GB)
+#      - llvm-project source (toolchain source, prebuilt sudah cukup)
+#      - chromium-webview, cronet, fuchsia, qemu-kernel, abi-dumps
+#      - darwin prebuilts (kita di Linux)
+#      - skia, perfetto, swift, dart, v8 (tidak dipakai untuk camera HAL)
+#      - apps tidak relevan (Chrome, Music, Calendar, dst)
+#      - developers/, docs/
+#      KEEP:
+#      - prebuilts/rust, prebuilts/cmake, prebuilts/ndk, prebuilts/sdk
+#      - prebuilts/maven_repo, prebuilts/asuite
+#      - frameworks/rs, frameworks/compile/*
+#      - packages/modules/Connectivity (full, jangan disentuh apex/Tethering)
+#      - packages/apps/Settings, SystemUI, Launcher3 (Connectivity butuh)
+#
+#   2. NO scrubber (default skip_scrubber=true).
+#      Scrubber iteratif itu obat untuk runner 101GB. Di VPS 160GB
+#      kita biarkan source utuh, soong akan resolve sendiri kalau modulnya
+#      ada di tree.
+#
+#   3. NO preemptive nuke folder core. Hanya hapus folder test (cts/mts/vts/sts)
+#      yang sudah di-prune via manifest tapi masih leftover dari sync sebelumnya.
+#
+#   4. ALLOW_MISSING_DEPENDENCIES=true + m -k -> module yang depend ke test
+#      defaults yang kepotong akan SKIP, bukan fatal error.
+#
+#   5. Resumable tetap: sentinel /mnt/aosp/.state, ccache 25G persistent,
+#      out/ persistent.
 # ============================================================================
 
 on:
@@ -46,14 +63,14 @@ on:
         description: 'Hapus out/ sebelum build (true/false). Default false = incremental.'
         required: false
         default: 'false'
-      skip_scrubber:
-        description: 'Skip scrubber Android.bp (true/false). Default false.'
+      enable_scrubber:
+        description: 'Aktifkan scrubber Android.bp iteratif (default false di v10.2)'
         required: false
         default: 'false'
 
 jobs:
   build:
-    name: Build External Camera HAL (Self-Hosted, Resumable)
+    name: Build External Camera HAL (Self-Hosted v10.2, Resumable)
     runs-on: self-hosted
     timeout-minutes: 1200
 
@@ -61,43 +78,36 @@ jobs:
       AOSP_ROOT: /mnt/aosp
       STATE_DIR: /mnt/aosp/.state
       CCACHE_DIR: /mnt/aosp/.ccache
-      CCACHE_SIZE: 40G
+      CCACHE_SIZE: 25G
       TMPDIR: /mnt/aosp/tmpdir
       TMP: /mnt/aosp/tmpdir
       TEMP: /mnt/aosp/tmpdir
 
     steps:
       # ====================================================================
-      # Step 0: Diagnostic awal (selalu jalan)
+      # Step 0: Diagnostic
       # ====================================================================
       - name: Show runner & disk info
         run: |
-          echo "=== Hostname / User ==="
-          hostname
-          whoami
+          echo "=== Hostname / User ==="; hostname; whoami
           echo ""
-          echo "=== Disk ==="
-          df -h
+          echo "=== Disk ==="; df -h
           echo ""
-          echo "=== Memory ==="
-          free -h
+          echo "=== Memory ==="; free -h
           echo ""
-          echo "=== CPU cores ==="
-          nproc
+          echo "=== CPU cores ==="; nproc
           echo ""
-          echo "=== State dir (sentinel files) ==="
+          echo "=== State dir (sentinel) ==="
           ls -la ${STATE_DIR} 2>/dev/null || echo "(belum ada, first run)"
           echo ""
-          echo "=== ccache size limit ==="
+          echo "=== ccache ==="
           which ccache && ccache -s 2>/dev/null | head -10 || echo "ccache belum terinstall"
 
       # ====================================================================
-      # Step 1: Persistent dirs (idempotent)
+      # Step 1: Persistent dirs
       # ====================================================================
       - name: Prepare persistent directories
         run: |
-          # sudo mungkin perlu password-less untuk user runner di VPS
-          # kalau bukan root, pastikan user sudo di VPS sudah NOPASSWD
           sudo mkdir -p \
             ${AOSP_ROOT} \
             ${AOSP_ROOT}/tmpdir \
@@ -108,7 +118,6 @@ jobs:
             ${AOSP_ROOT}/home
           sudo chown -R $USER:$USER ${AOSP_ROOT}
           chmod 1777 ${AOSP_ROOT}/tmpdir
-          echo "Persistent dirs siap di ${AOSP_ROOT}"
           ls -la ${AOSP_ROOT}
 
       # ====================================================================
@@ -117,7 +126,7 @@ jobs:
       - name: Install AOSP build deps (cached)
         run: |
           if [ -f ${STATE_DIR}/deps.done ]; then
-            echo "Deps sudah terinstall (sentinel ada). Skip apt install."
+            echo "Deps sudah terinstall. Skip."
             exit 0
           fi
           sudo apt-get update -qq
@@ -128,59 +137,53 @@ jobs:
             fontconfig openjdk-17-jdk python3 python3-pip ccache rsync \
             libssl-dev bc cpio kmod
           touch ${STATE_DIR}/deps.done
-          echo "Deps terinstall, sentinel ditulis."
 
       # ====================================================================
-      # Step 3: Setup repo tool & git config (idempotent)
+      # Step 3: Setup repo tool & git config
       # ====================================================================
       - name: Setup repo tool & git config
         run: |
           if [ ! -f ${AOSP_ROOT}/bin/repo ]; then
             curl -s https://storage.googleapis.com/git-repo-downloads/repo > ${AOSP_ROOT}/bin/repo
             chmod a+x ${AOSP_ROOT}/bin/repo
-            echo "repo tool diunduh."
-          else
-            echo "repo tool sudah ada, skip."
           fi
           echo "${AOSP_ROOT}/bin" >> $GITHUB_PATH
           echo "HOME=${AOSP_ROOT}/home" >> $GITHUB_ENV
-
           HOME=${AOSP_ROOT}/home git config --global user.email "santuyajah6@gmail.com"
           HOME=${AOSP_ROOT}/home git config --global user.name "Santuyajah"
           HOME=${AOSP_ROOT}/home git config --global color.ui false
           HOME=${AOSP_ROOT}/home git config --global pack.threads 4
 
       # ====================================================================
-      # Step 4: Repo init (skip kalau branch sama)
+      # Step 4: Repo init
       # ====================================================================
       - name: Repo init (skip if same branch)
         working-directory: /mnt/aosp
         run: |
           BRANCH="${{ github.event.inputs.aosp_branch }}"
           INIT_MARKER="${STATE_DIR}/repo_init_${BRANCH}.done"
-
           if [ -f "$INIT_MARKER" ] && [ -d .repo ]; then
-            echo "Repo sudah init untuk branch '$BRANCH'. Skip."
+            echo "Repo sudah init untuk '$BRANCH'. Skip."
           else
-            # Clear marker init untuk branch lain
             rm -f ${STATE_DIR}/repo_init_*.done
             ${AOSP_ROOT}/bin/repo init \
               -u https://android.googlesource.com/platform/manifest \
               -b "$BRANCH" \
               --depth=1 --no-tags --no-clone-bundle
             touch "$INIT_MARKER"
-            # invalidate sync marker karena branch berubah
             rm -f ${STATE_DIR}/repo_sync_*.done
           fi
 
       # ====================================================================
-      # Step 5: Local manifest (selalu rewrite, idempotent)
+      # Step 5: Local manifest - PRUNE MINIMAL (v10.2)
       # ====================================================================
-      - name: Apply prune local manifest
+      # Filosofi: hanya buang yang BESAR dan TIDAK MUNGKIN dipakai camera HAL.
+      # Jangan buang prebuilts/rust, frameworks/rs, Connectivity/*, apps Settings,
+      # karena banyak modul core depend.
+      - name: Apply minimal prune local manifest
         working-directory: /mnt/aosp
         run: |
           mkdir -p .repo/local_manifests
-          # Hash manifest sekarang utk deteksi perubahan
           OLD_HASH=""
           if [ -f .repo/local_manifests/skip_safe.xml ]; then
             OLD_HASH=$(sha256sum .repo/local_manifests/skip_safe.xml | awk '{print $1}')
@@ -189,115 +192,104 @@ jobs:
           cat > .repo/local_manifests/skip_safe.xml << 'EOF'
           <?xml version="1.0" encoding="UTF-8"?>
           <manifest>
-            <!-- ===== TIER 1: Test suites ===== -->
+            <!-- ===== TIER A: Test suites (puluhan GB, aman dibuang) ===== -->
             <remove-project name="platform/cts" optional="true"/>
             <remove-project name="platform/test/cts-root" optional="true"/>
             <remove-project name="platform/test/mts" optional="true"/>
-            <remove-project name="platform/test/graphics" optional="true"/>
             <remove-project name="platform/test/vts" optional="true"/>
             <remove-project name="platform/test/vts-testcase" optional="true"/>
+            <remove-project name="platform/test/suite_harness" optional="true"/>
             <remove-project name="platform/test/dittosuite" optional="true"/>
             <remove-project name="platform/test/app_compat" optional="true"/>
-            <remove-project name="platform/test/suite_harness" optional="true"/>
+            <remove-project name="platform/test/graphics" optional="true"/>
 
-            <!-- ===== TIER 2: Toolchain source / alt langs ===== -->
+            <!-- ===== TIER B: Toolchain SOURCE (prebuilts cukup) ===== -->
             <remove-project name="platform/external/llvm-project" optional="true"/>
             <remove-project name="platform/external/llvm" optional="true"/>
             <remove-project name="platform/external/clang" optional="true"/>
             <remove-project name="platform/external/lldb-llvm" optional="true"/>
-            <remove-project name="platform/prebuilts/rust" optional="true"/>
-            <remove-project name="platform/prebuilts/v8" optional="true"/>
-            <remove-project name="platform/external/v8" optional="true"/>
-            <remove-project name="platform/external/swift" optional="true"/>
-            <remove-project name="platform/external/dart" optional="true"/>
+            <!-- JANGAN remove prebuilts/rust : external/rust/cxx butuh defaults -->
+            <!-- JANGAN remove frameworks/rs : RenderScript dipakai banyak modul -->
 
-            <!-- ===== TIER 3: ABI dumps ===== -->
+            <!-- ===== TIER C: Browser & web (besar, gak relevan camera) ===== -->
+            <remove-project name="platform/external/chromium-webview" optional="true"/>
+            <remove-project name="platform/external/chromium-libpac" optional="true"/>
+            <remove-project name="platform/external/cronet" optional="true"/>
+            <remove-project name="platform/external/v8" optional="true"/>
+            <remove-project name="platform/prebuilts/v8" optional="true"/>
+
+            <!-- ===== TIER D: ABI dumps (besar, hanya untuk ABI check) ===== -->
             <remove-project name="platform/prebuilts/abi-dumps" optional="true"/>
             <remove-project name="platform/prebuilts/abi-dumps/ndk" optional="true"/>
             <remove-project name="platform/prebuilts/abi-dumps/platform" optional="true"/>
             <remove-project name="platform/prebuilts/abi-dumps/vndk" optional="true"/>
 
-            <!-- ===== TIER 4: Browser & web ===== -->
-            <remove-project name="platform/external/chromium-webview" optional="true"/>
-            <remove-project name="platform/external/chromium-libpac" optional="true"/>
-            <remove-project name="platform/external/cronet" optional="true"/>
+            <!-- ===== TIER E: Darwin (kita di Linux) ===== -->
+            <remove-project name="platform/prebuilts/clang-darwin" optional="true"/>
+            <remove-project name="platform/prebuilts/build-tools-darwin" optional="true"/>
+            <remove-project name="platform/prebuilts/python-darwin" optional="true"/>
+            <remove-project name="platform/prebuilts/go/darwin-x86" optional="true"/>
 
-            <!-- ===== TIER 5: Build/SDK extras ===== -->
+            <!-- ===== TIER F: Misc besar gak relevan ===== -->
             <remove-project name="platform/prebuilts/fuchsia_sdk" optional="true"/>
             <remove-project name="platform/prebuilts/qemu-kernel" optional="true"/>
-            <remove-project name="platform/prebuilts/maven_repo/android" optional="true"/>
-            <remove-project name="platform/prebuilts/maven_repo/bumblebee" optional="true"/>
-            <remove-project name="platform/prebuilts/cmake" optional="true"/>
-            <remove-project name="platform/prebuilts/cmake-linux" optional="true"/>
-            <remove-project name="platform/prebuilts/cmake-darwin" optional="true"/>
-            <remove-project name="platform/prebuilts/ndk" optional="true"/>
-            <remove-project name="platform/prebuilts/sdk" optional="true"/>
-            <remove-project name="platform/prebuilts/runtime" optional="true"/>
-            <remove-project name="platform/prebuilts/asuite" optional="true"/>
+            <remove-project name="platform/external/swift" optional="true"/>
+            <remove-project name="platform/external/dart" optional="true"/>
+            <remove-project name="platform/external/skqp" optional="true"/>
+            <remove-project name="platform/external/perfetto" optional="true"/>
+            <remove-project name="platform/external/tensorflow" optional="true"/>
+            <remove-project name="platform/external/grpc-grpc-java" optional="true"/>
 
-            <!-- ===== TIER 6: Apps tidak relevan ===== -->
+            <!-- ===== TIER G: Apps tidak relevan ===== -->
             <remove-project name="platform/packages/apps/Chrome" optional="true"/>
             <remove-project name="platform/packages/apps/Browser2" optional="true"/>
-            <remove-project name="platform/packages/apps/Bluetooth" optional="true"/>
-            <remove-project name="platform/packages/apps/EmergencyInfo" optional="true"/>
             <remove-project name="platform/packages/apps/Gallery2" optional="true"/>
             <remove-project name="platform/packages/apps/Music" optional="true"/>
             <remove-project name="platform/packages/apps/Calendar" optional="true"/>
             <remove-project name="platform/packages/apps/DeskClock" optional="true"/>
             <remove-project name="platform/packages/apps/Email" optional="true"/>
             <remove-project name="platform/packages/apps/Messaging" optional="true"/>
+            <remove-project name="platform/packages/apps/EmergencyInfo" optional="true"/>
+            <remove-project name="platform/packages/apps/UniversalMediaPlayer" optional="true"/>
+            <remove-project name="platform/packages/apps/TV" optional="true"/>
 
-            <!-- ===== TIER 7: Misc ===== -->
+            <!-- ===== TIER H: Docs & developers ===== -->
             <remove-project name="platform/developers/build" optional="true"/>
             <remove-project name="platform/developers/demos" optional="true"/>
             <remove-project name="platform/developers/samples" optional="true"/>
             <remove-project name="platform/developers/docs" optional="true"/>
             <remove-project name="platform/developers/samples/android" optional="true"/>
             <remove-project name="platform/docs/source.android.com" optional="true"/>
-            <remove-project name="platform/external/perfetto" optional="true"/>
-            <remove-project name="platform/external/skia" optional="true"/>
-            <remove-project name="platform/external/skqp" optional="true"/>
-            <remove-project name="platform/frameworks/wilhelm" optional="true"/>
-            <remove-project name="platform/frameworks/opt/photoviewer" optional="true"/>
 
-            <!-- ===== TIER 8: Darwin & kernel ===== -->
-            <remove-project name="platform/prebuilts/clang-darwin" optional="true"/>
-            <remove-project name="platform/prebuilts/build-tools-darwin" optional="true"/>
-            <remove-project name="platform/prebuilts/python-darwin" optional="true"/>
-            <remove-project name="platform/prebuilts/go/darwin-x86" optional="true"/>
-            <remove-project name="platform/prebuilts/kernel/x86_64" optional="true"/>
-            <remove-project name="platform/prebuilts/kernel/arm64" optional="true"/>
-            <remove-project name="platform/packages/apps/Contacts" optional="true"/>
-            <remove-project name="platform/packages/apps/Dialer" optional="true"/>
-            <remove-project name="platform/packages/apps/TV" optional="true"/>
-            <remove-project name="platform/packages/apps/CarrierConfig" optional="true"/>
-            <remove-project name="platform/packages/apps/UniversalMediaPlayer" optional="true"/>
-            <remove-project name="platform/packages/apps/Settings" optional="true"/>
-            <remove-project name="platform/packages/apps/SystemUI" optional="true"/>
-            <remove-project name="platform/packages/apps/Launcher3" optional="true"/>
-            <remove-project name="platform/external/grpc-grpc" optional="true"/>
-            <remove-project name="platform/external/grpc-grpc-java" optional="true"/>
-            <remove-project name="platform/external/tensorflow" optional="true"/>
-            <remove-project name="platform/external/sonivox" optional="true"/>
+            <!-- ===== TIER I: Maven darwin only ===== -->
+            <remove-project name="platform/prebuilts/maven_repo/bumblebee" optional="true"/>
 
-            <!-- ===== TIER 9: RenderScript chain ===== -->
-            <remove-project name="platform/frameworks/compile/mclinker" optional="true"/>
-            <remove-project name="platform/frameworks/compile/slang" optional="true"/>
-            <remove-project name="platform/frameworks/compile/libbcc" optional="true"/>
-            <remove-project name="platform/frameworks/rs" optional="true"/>
+            <!-- JANGAN PRUNE (di-keep untuk dependency resolution): -->
+            <!--   prebuilts/rust         -> external/rust/cxx defaults -->
+            <!--   prebuilts/cmake        -> beberapa modul cc -->
+            <!--   prebuilts/ndk          -> JNI -->
+            <!--   prebuilts/sdk          -> framework -->
+            <!--   prebuilts/maven_repo/android -> AndroidX -->
+            <!--   prebuilts/asuite       -> tradefed lite -->
+            <!--   frameworks/rs          -> RenderScript -->
+            <!--   frameworks/compile/*   -> RS chain -->
+            <!--   packages/modules/Connectivity -> Tethering apex defaults -->
+            <!--   packages/apps/Settings,SystemUI,Launcher3 -> framework dep -->
+            <!--   external/skia          -> defaults dipakai modul lain -->
+            <!--   external/grpc-grpc     -> dipakai system service -->
           </manifest>
           EOF
 
           NEW_HASH=$(sha256sum .repo/local_manifests/skip_safe.xml | awk '{print $1}')
           if [ "$OLD_HASH" != "$NEW_HASH" ]; then
-            echo "Manifest berubah. Invalidate sync marker supaya re-sync."
+            echo "Manifest berubah. Invalidate sync marker."
             rm -f ${STATE_DIR}/repo_sync_*.done
           else
-            echo "Manifest sama dengan sebelumnya, sync marker tetap."
+            echo "Manifest sama dengan run sebelumnya."
           fi
 
       # ====================================================================
-      # Step 6: Repo sync (skip kalau sudah sukses, kecuali force_resync=true)
+      # Step 6: Repo sync (resumable)
       # ====================================================================
       - name: Repo sync (resumable)
         working-directory: /mnt/aosp
@@ -307,36 +299,32 @@ jobs:
           FORCE="${{ github.event.inputs.force_resync }}"
 
           if [ "$FORCE" = "true" ]; then
-            echo "force_resync=true -> hapus marker untuk paksa sync ulang."
+            echo "force_resync=true -> hapus marker."
             rm -f "$SYNC_MARKER"
           fi
 
           if [ -f "$SYNC_MARKER" ]; then
-            echo "Sync sebelumnya sukses ($SYNC_MARKER ada)."
-            echo "Light-sync incremental untuk pull update terbaru saja..."
+            echo "Sync sebelumnya sukses. Light-sync incremental..."
             ${AOSP_ROOT}/bin/repo sync \
               -c -j$(nproc) --no-clone-bundle --no-tags --optimized-fetch \
               --fail-fast || {
-                echo "Light sync gagal. Fallback ke force-sync penuh..."
+                echo "Light sync gagal. Fallback force-sync..."
                 ${AOSP_ROOT}/bin/repo sync \
                   -c -j$(nproc) --force-sync --no-clone-bundle \
                   --no-tags --optimized-fetch --fail-fast
               }
           else
-            echo "First-time sync penuh untuk branch '$BRANCH'..."
-            set +e
+            echo "First-time sync penuh untuk '$BRANCH'..."
             for i in 1 2 3; do
               echo "===== Attempt $i/3 ====="
               ${AOSP_ROOT}/bin/repo sync \
                 -c -j$(nproc) --force-sync --no-clone-bundle \
-                --no-tags --optimized-fetch --fail-fast
-              RC=$?
-              if [ $RC -eq 0 ]; then
-                touch "$SYNC_MARKER"
-                echo "Sync sukses di attempt $i."
-                break
-              fi
-              echo "Sync gagal (rc=$RC), tunggu 60s lalu retry..."
+                --no-tags --optimized-fetch --fail-fast && {
+                  touch "$SYNC_MARKER"
+                  echo "Sync sukses di attempt $i."
+                  break
+                }
+              echo "Sync gagal, tunggu 60s..."
               sleep 60
             done
             if [ ! -f "$SYNC_MARKER" ]; then
@@ -347,204 +335,68 @@ jobs:
           df -h ${AOSP_ROOT}
 
       # ====================================================================
-      # Step 7: Post-sync cleanup ringan (idempotent)
+      # Step 7: Light cleanup leftover - HANYA folder test, bukan core
       # ====================================================================
-      - name: Post-sync cleanup (light)
+      - name: Cleanup leftover test folders only
         working-directory: /mnt/aosp
         run: |
+          # Folder yang sudah di-prune via manifest, tapi mungkin leftover
           for d in \
-            external/chromium-webview \
-            external/cronet \
-            external/llvm-project \
-            external/llvm \
-            external/clang \
-            external/skia \
-            external/skqp \
-            kernel/common \
-            kernel/common-modules \
-            prebuilts/abi-dumps \
-            prebuilts/fuchsia_sdk \
-            prebuilts/qemu-kernel \
-            prebuilts/cmake \
-            prebuilts/ndk \
-            prebuilts/maven_repo \
-            prebuilts/sdk \
-            developers \
-            docs \
             cts \
             test/cts-root \
             test/mts \
-            test/graphics ; do
+            test/vts \
+            test/vts-testcase \
+            test/suite_harness \
+            test/dittosuite \
+            test/app_compat \
+            test/graphics \
+            external/llvm-project \
+            external/llvm \
+            external/clang \
+            external/chromium-webview \
+            external/chromium-libpac \
+            external/cronet \
+            external/skqp \
+            external/perfetto \
+            external/tensorflow \
+            external/swift \
+            external/dart \
+            external/grpc-grpc-java \
+            prebuilts/abi-dumps \
+            prebuilts/fuchsia_sdk \
+            prebuilts/qemu-kernel \
+            prebuilts/clang-darwin \
+            prebuilts/build-tools-darwin \
+            prebuilts/python-darwin \
+            developers \
+            docs ; do
             if [ -e "$d" ]; then
               SIZE=$(du -sh "$d" 2>/dev/null | cut -f1)
               rm -rf "$d" && echo "Removed $d (was $SIZE)"
             fi
           done
+
+          # Tidak melakukan preemptive nuke folder-folder Connectivity/Tethering
+          # karena di v10.1 itu yang bikin ConnectivityNextEnableDefaults hilang.
+          echo ""
           df -h ${AOSP_ROOT}
 
       # ====================================================================
-      # Step 8: PREEMPTIVE NUKE - folder yang menyebabkan error build sebelumnya
+      # Step 8: Optional scrubber (default OFF di v10.2)
       # ====================================================================
-      # Error sebelumnya:
-      #   1. tools/security/fuzzing/orphans/libskia/Android.bp:5:1
-      #      "libskia_image_processor_fuzzer" depends on undefined "skia_deps"
-      #      -> skia_deps di-define di external/skia yang sudah di-prune.
-      #   2. tools/platform-compat/java/android/compat/testing/app/Android.bp:19:1
-      #      "SharedLibraryInfoTestApp" depends on undefined "cts_defaults"
-      #      -> cts_defaults di cts yang di-prune.
-      #   3. packages/modules/Connectivity/bpf/tests/mts/Android.bp:21:1
-      #      "bpf_existence_test" depends on undefined "connectivity-mainline-presubmit-cc-defaults"
-      #      -> defaults di-define di mts/cts yang di-prune.
-      # Solusi paling reliable: hapus folder-folder itu eksplisit.
-      - name: Preemptive nuke folders penyebab error
+      - name: Iterative broken-bp scrubber (OPTIONAL)
+        if: ${{ github.event.inputs.enable_scrubber == 'true' }}
         working-directory: /mnt/aosp
         run: |
-          echo "=========================================================="
-          echo " TIER 0: Hapus folder yang Android.bp-nya parse-fail"
-          echo " (terkait fuzzing/testing/mts/cts yang di-prune)"
-          echo "=========================================================="
-          for d in \
-            tools/security/fuzzing/orphans/libskia \
-            tools/security/fuzzing/orphans \
-            tools/security/fuzzing \
-            tools/platform-compat/java/android/compat/testing/app \
-            tools/platform-compat/java/android/compat/testing \
-            tools/platform-compat \
-            packages/modules/Connectivity/bpf/tests/mts \
-            packages/modules/Connectivity/bpf/tests \
-            packages/modules/Connectivity/Tethering/tests \
-            packages/modules/Connectivity/Tethering/apex \
-            packages/modules/Connectivity/tests \
-            packages/modules/CaptivePortalLogin/tests \
-            packages/modules/NetworkStack/tests \
-            packages/modules/IPsec/tests \
-            packages/modules/DnsResolver/tests \
-            packages/modules/Wifi/framework/tests \
-            packages/modules/Wifi/service/tests \
-            packages/modules/Bluetooth/android/app/tests \
-            packages/modules/Bluetooth/system/blueberry \
-            frameworks/opt/telephony/tests \
-            frameworks/opt/net/wifi/tests \
-            frameworks/base/services/tests \
-            frameworks/base/core/tests \
-            frameworks/base/tests \
-            frameworks/native/services/surfaceflinger/tests \
-            frameworks/native/libs/gui/tests \
-            frameworks/native/libs/renderengine/tests \
-            hardware/interfaces/graphics/composer/2.1/utils/vts \
-            hardware/interfaces/graphics/composer/2.2/utils/vts \
-            hardware/interfaces/graphics/composer/2.3/utils/vts \
-            hardware/interfaces/graphics/composer/2.4/utils/vts \
-            hardware/interfaces/graphics/composer/aidl/vts \
-            hardware/interfaces/graphics/mapper/2.0/utils/vts \
-            hardware/interfaces/graphics/mapper/2.1/utils/vts \
-            hardware/interfaces/graphics/mapper/3.0/utils/vts \
-            hardware/interfaces/graphics/mapper/4.0/utils/vts \
-            hardware/interfaces/graphics/allocator/2.0/utils/vts \
-            hardware/interfaces/graphics/allocator/3.0/utils/vts \
-            hardware/interfaces/graphics/allocator/4.0/utils/vts ; do
-            if [ -d "$d" ]; then
-              SIZE=$(du -sh "$d" 2>/dev/null | cut -f1)
-              rm -rf "$d" && echo "  RM: $d (was $SIZE)"
-            fi
-          done
-
-          echo ""
-          echo "=== Sisa Android.bp yang masih reference defaults bermasalah ==="
-          grep -rlE 'skia_deps|cts_defaults|connectivity-mainline-presubmit-cc-defaults|mts_defaults|vts_defaults|sts_defaults' \
-            --include='Android.bp' . 2>/dev/null | head -30 || echo "  (kosong = bagus)"
-
-      # ====================================================================
-      # Step 9: Restore Android.bp.disabled di folder kritis (safety net)
-      # ====================================================================
-      - name: Restore Android.bp di folder kritis (untuk camera HAL)
-        working-directory: /mnt/aosp
-        run: |
-          KRITIS=(
-            "frameworks/native/libs"
-            "frameworks/native/services/surfaceflinger"
-            "frameworks/av/camera"
-            "frameworks/av/services/camera"
-            "frameworks/av/media/libstagefright/foundation"
-            "hardware/interfaces/camera"
-            "hardware/interfaces/graphics/composer"
-            "hardware/interfaces/graphics/mapper"
-            "hardware/interfaces/graphics/allocator"
-            "hardware/interfaces/graphics/common"
-            "hardware/libhardware"
-            "system/core"
-            "system/libhidl"
-            "system/libfmq"
-            "system/libbase"
-            "system/security"
-            "external/jpeg-turbo"
-            "external/libyuv"
-            "external/tinyxml2"
-            "external/libexif"
-            "external/expat"
-            "bionic"
-            "build"
-          )
-          RESTORED=0
-          for base in "${KRITIS[@]}"; do
-            [ ! -d "$base" ] && continue
-            while IFS= read -r f; do
-              # Skip kalau path test/vts/etc - itu memang harus tetap disabled
-              if echo "$f" | grep -qE '/tests?/|/vts/|/mts/|/cts/|/sts/|/benchmarks?/|/fuzz(ers?)?/|/orphans/|/testing/'; then
-                continue
-              fi
-              ORIG="${f%.disabled}"
-              mv "$f" "$ORIG" && RESTORED=$((RESTORED+1))
-            done < <(find "$base" -name "Android.bp.disabled" 2>/dev/null)
-          done
-          echo "Restored $RESTORED Android.bp di folder kritis"
-
-      # ====================================================================
-      # Step 10: Iterative scrubber STRICT (regex diperluas)
-      # ====================================================================
-      # Perubahan vs v9.10:
-      #   - Tambah pattern path: /testing/, /orphans/, /fuzzers?/
-      #     (sebelumnya /testing/ tidak match -> cts_defaults bug lolos)
-      #   - Tambah pattern symbol: skia_deps, connectivity-mainline-*
-      - name: Iterative broken-bp scrubber (v10.1 STRICT)
-        if: ${{ github.event.inputs.skip_scrubber != 'true' }}
-        working-directory: /mnt/aosp
-        run: |
-          # Path yang BOLEH di-disable
+          # Hanya disable Android.bp di path test/vts/cts/mts/sts/fuzz/orphans/testing
+          # yang reference defaults yang sudah hilang.
           TEST_PATH_REGEX='/tests?/|/vts/|/mts/|/cts/|/sts/|/benchmarks?/|/fuzz(ers?)?/|/perftests?/|/orphans/|/testing/'
+          PROTECT_REGEX='hardware/interfaces/camera/(provider|device|common)/(default|[0-9])|hardware/libhardware/include/hardware/camera|frameworks/native/libs/(renderengine|gui|ui|nativewindow|sync)/Android\.bp$|frameworks/native/services/surfaceflinger/Android\.bp$|frameworks/av/camera/Android\.bp$'
 
           is_test_path() { echo "$1" | grep -qE "$TEST_PATH_REGEX"; }
-          is_protected() {
-            echo "$1" | grep -qE 'hardware/interfaces/camera/(provider|device|common)/(default|[0-9])|hardware/libhardware/include/hardware/camera|frameworks/native/libs/(renderengine|gui|ui|nativewindow|sync)/Android\.bp$|frameworks/native/services/surfaceflinger/Android\.bp$|frameworks/av/camera/Android\.bp$'
-          }
+          is_protected() { echo "$1" | grep -qE "$PROTECT_REGEX"; }
 
-          echo "=========================================================="
-          echo " PHASE 1: Initial strip via PATTERNS (test-path only)"
-          echo "=========================================================="
-          PATTERNS='"cts_defaults"|"mts_defaults"|"vts_defaults"|"sts_defaults"|"rs_defaults"|"mts-target-sdk-version-current"|"cts-tradefed"|"vts-tradefed"|"mts-tradefed"|"compatibility_test_suite_package"|"test_suite_package"|"csuite-tradefed"|"catbox-tradefed"|"framework-connectivity-test-defaults"|"framework-connectivity-internal-test-defaults"|"framework-connectivity-t-defaults"|"connectivity-mainline-presubmit-cc-defaults"|"llvm_tblgen"|"skia_deps"'
-
-          BROKEN_FILES=$(grep -rlE "$PATTERNS" --include="Android.bp" \
-            --exclude-dir=".repo" \
-            . 2>/dev/null || true)
-
-          INITIAL_COUNT=0
-          SKIPPED_NON_TEST=0
-          for f in $BROKEN_FILES; do
-            is_protected "$f" && continue
-            if ! is_test_path "$f"; then
-              SKIPPED_NON_TEST=$((SKIPPED_NON_TEST+1))
-              continue
-            fi
-            mv "$f" "${f}.disabled"
-            INITIAL_COUNT=$((INITIAL_COUNT+1))
-          done
-          echo "Initial pass: $INITIAL_COUNT Android.bp di-disabled"
-          echo "Skipped (non-test path tapi match pattern): $SKIPPED_NON_TEST"
-
-          echo ""
-          echo "=========================================================="
-          echo " PHASE 2: Iterative bootstrap-and-fix"
-          echo "=========================================================="
           source build/envsetup.sh
           lunch ${{ github.event.inputs.build_variant }}
           export USE_CCACHE=1
@@ -553,12 +405,9 @@ jobs:
           export ALLOW_MISSING_DEPENDENCIES=true
 
           MAX_ITER=10
-          ABORT_REASON=""
           mkdir -p ${AOSP_ROOT}/logs
           for iter in $(seq 1 $MAX_ITER); do
-            echo ""
             echo ">>>>> Iteration $iter / $MAX_ITER <<<<<"
-
             ERR_LOG=${AOSP_ROOT}/logs/bootstrap_err_${iter}.log
             timeout 900 m nothing 2>&1 | tee "$ERR_LOG" | tail -100 || true
 
@@ -566,74 +415,30 @@ jobs:
                      | sed -E 's/error:\s+//;s/:$//' | sort -u || true)
 
             if [ -z "$BAD_BP" ]; then
-              if grep -q "soong bootstrap failed" "$ERR_LOG"; then
-                echo "Bootstrap fail tapi tidak ada error Android.bp."
-                ABORT_REASON="bootstrap_fail_no_bp_error"
-                tail -80 "$ERR_LOG"
-                break
-              fi
               echo "Bootstrap PASS"
               break
             fi
 
             BP_COUNT=0
-            FOUND_NON_TEST=0
             for bp in $BAD_BP; do
               [ ! -f "$bp" ] && continue
               if is_protected "$bp"; then
-                echo "  PROTECTED (refuse to disable): $bp"
-                FOUND_NON_TEST=1
+                echo "  PROTECTED: $bp"
                 continue
               fi
               if ! is_test_path "$bp"; then
-                echo "  NON-TEST PATH (refuse to disable): $bp"
-                FOUND_NON_TEST=1
+                echo "  NON-TEST PATH (refuse): $bp"
                 continue
               fi
               echo "  Disabling: $bp"
               mv "$bp" "${bp}.disabled"
               BP_COUNT=$((BP_COUNT+1))
             done
-            echo "Iteration $iter: disabled $BP_COUNT Android.bp"
-
-            if [ "$BP_COUNT" -eq 0 ]; then
-              if [ "$FOUND_NON_TEST" -eq 1 ]; then
-                ABORT_REASON="non_test_error"
-              fi
-              break
-            fi
-          done
-
-          echo ""
-          echo "=========================================================="
-          echo " PHASE 3: Final verification"
-          echo "=========================================================="
-          if [ -n "$ABORT_REASON" ]; then
-            echo "Scrubber STOP karena: $ABORT_REASON"
-            ls -t ${AOSP_ROOT}/logs/bootstrap_err_*.log 2>/dev/null | head -1 | xargs tail -100 || true
-            # JANGAN exit 1 - biar Verify step yang decide. Mungkin error
-            # bukan blocker untuk module camera HAL.
-          fi
-
-          echo ""
-          echo "=== Camera HAL Android.bp masih ada ==="
-          ls -la hardware/interfaces/camera/provider/default/Android.bp
-          ls -la hardware/interfaces/camera/device/default/Android.bp
-          echo ""
-          echo "=== Total Android.bp.disabled ==="
-          find . -name "Android.bp.disabled" -not -path "./.repo/*" 2>/dev/null | wc -l
-          echo ""
-          echo "=== Sanity: file modul utama tetap ada ==="
-          for f in \
-            frameworks/native/libs/renderengine/Android.bp \
-            frameworks/native/services/surfaceflinger/Android.bp \
-            frameworks/native/libs/gui/Android.bp \
-            frameworks/native/libs/ui/Android.bp ; do
-            [ -f "$f" ] && echo "  OK: $f" || echo "  MISSING: $f"
+            [ "$BP_COUNT" -eq 0 ] && break
           done
 
       # ====================================================================
-      # Step 11: Verify camera HAL source ada
+      # Step 9: Verify camera HAL source
       # ====================================================================
       - name: Verify external camera HAL source
         working-directory: /mnt/aosp
@@ -649,21 +454,14 @@ jobs:
               MISSING=1
             fi
           done
-          if [ $MISSING -ne 0 ]; then
-            echo ""
-            echo "FATAL: source camera HAL tidak ditemukan."
-            echo "Coba rerun dengan force_resync=true"
-            exit 1
-          fi
+          [ $MISSING -ne 0 ] && { echo "FATAL: source camera HAL hilang. Coba force_resync=true"; exit 1; } || true
 
       # ====================================================================
-      # Step 12: Build (incremental, ccache, keep-going)
+      # Step 10: Build (incremental, ccache, keep-going, allow missing)
       # ====================================================================
-      # Kalau build gagal di tengah, rerun step ini saja akan resume:
-      #   - out/ persist di VPS
-      #   - ccache persist di /mnt/aosp/.ccache
-      #   - soong tahu modul mana yang sudah selesai
-      # 'm -k' (keep-going) bikin module lain lanjut walau satu modul gagal.
+      # Trick utama supaya dependency yang missing (defaults dari cts/mts dst)
+      # tidak fatal: ALLOW_MISSING_DEPENDENCIES=true + m -k.
+      # Module yang depend defaults missing akan di-skip, modul kita lanjut.
       - name: Build external camera HAL (incremental + ccache)
         working-directory: /mnt/aosp
         run: |
@@ -683,30 +481,32 @@ jobs:
           ccache -M ${CCACHE_SIZE}
           ccache -z 2>/dev/null || true
 
-          echo "=== Disk before build ==="
-          df -h ${AOSP_ROOT}
-          echo "=== ccache stats before ==="
-          ccache -s 2>/dev/null | head -20 || true
+          # Kunci: ALLOW_MISSING_DEPENDENCIES=true bikin soong toleran
+          # terhadap module yang depend ke defaults yang hilang
+          # (mis. cts_support_defaults, ConnectivityNextEnableDefaults dst).
+          # Module-module test akan di-skip; module camera HAL jalan.
+          export ALLOW_MISSING_DEPENDENCIES=true
+          export TARGET_BUILD_UNBUNDLED=true
 
-          # -k = keep-going, tetap lanjut bangun modul lain walau ada yg gagal
+          echo "=== Disk before build ==="; df -h ${AOSP_ROOT}
+          echo "=== ccache stats before ==="; ccache -s 2>/dev/null | head -20 || true
+
+          # -k = keep-going
           m -j$(nproc) -k \
             android.hardware.camera.provider-V1-external-service \
             android.hardware.camera.provider-V1-external-impl \
             camera.device-external-impl \
             2>&1 | tee ${AOSP_ROOT}/build.log
 
-          echo "=== Disk after build ==="
-          df -h ${AOSP_ROOT}
-          echo "=== ccache stats after ==="
-          ccache -s 2>/dev/null | head -20 || true
+          echo "=== Disk after build ==="; df -h ${AOSP_ROOT}
+          echo "=== ccache stats after ==="; ccache -s 2>/dev/null | head -20 || true
 
       # ====================================================================
-      # Step 13: Collect artifacts
+      # Step 11: Collect artifacts
       # ====================================================================
       - name: Collect artifacts
         working-directory: /mnt/aosp
         run: |
-          # Bersih dulu artifacts/ supaya tidak ada bekas run lama tercampur
           rm -rf $GITHUB_WORKSPACE/artifacts
           mkdir -p $GITHUB_WORKSPACE/artifacts/vendor/bin/hw
           mkdir -p $GITHUB_WORKSPACE/artifacts/vendor/lib64/hw
@@ -742,7 +542,7 @@ jobs:
           du -sh $GITHUB_WORKSPACE/artifacts/ 2>/dev/null || true
 
       # ====================================================================
-      # Step 14: Upload (artifact + log)
+      # Step 12: Upload
       # ====================================================================
       - name: Upload HAL artifacts
         if: success()
@@ -772,13 +572,10 @@ jobs:
           if-no-files-found: ignore
 
       # ====================================================================
-      # Step 15: Cleanup workspace runner saja (BUKAN /mnt/aosp)
+      # Step 13: Cleanup workspace runner saja (BUKAN /mnt/aosp)
       # ====================================================================
-      # PENTING: jangan hapus /mnt/aosp! itu state yang harus persist
-      # antar run agar resumable.
       - name: Cleanup runner workspace only
         if: always()
         run: |
-          # Hanya bersihkan $GITHUB_WORKSPACE artifacts (yang sudah di-upload)
           rm -rf $GITHUB_WORKSPACE/artifacts || true
-          echo "Workspace runner dibersihkan. /mnt/aosp tetap utuh utk run berikutnya."
+          echo "Workspace runner dibersihkan. /mnt/aosp tetap utuh."
