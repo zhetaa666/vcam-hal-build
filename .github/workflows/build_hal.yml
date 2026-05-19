@@ -1,10 +1,28 @@
-name: Build External Camera HAL (HIDL 2.4)
+name: Build External Camera HAL (AIDL V1) v9.10
 
 # ============================================================================
-# Phase 4A v4 — VCam Project (Santuyajah)
-# Target: android.hardware.camera.provider@2.4-external-service (arm64)
-# Plus:   camera.device@3.4-external-impl.so (arm64)
-# v4 fix: /tmp pindah ke /mnt/aosp (root partition penuh = sync fail)
+# Phase 4A v9.10 — VCam Project (Santuyajah)
+# Target: android.hardware.camera.provider-V1-external-service (arm64)
+#
+# Perubahan v9.10 vs v9.9:
+#   - Error baru di v9.9: librenderengine_deps UNDEFINED di
+#       frameworks/native/services/surfaceflinger/Android.bp:44 (file UTAMA)
+#       hardware/interfaces/graphics/composer/2.2/utils/vts/Android.bp
+#       frameworks/native/services/surfaceflinger/tests/unittests/Android.bp
+#   - Penyebab: scrubber v9.9 over-aggressive me-rename
+#     `frameworks/native/libs/renderengine/Android.bp` (yang berisi module
+#     `librenderengine_deps`) hanya karena di sana ada pattern testing.
+#     Akibatnya modul utama yang dipakai surfaceflinger ikut hilang.
+#   - Fix v9.10:
+#       (a) RESTORE: balikkan dulu *.bp.disabled di folder kritis
+#           (frameworks/native/libs, frameworks/av, hardware/interfaces,
+#           system, external/jpeg-turbo, dll) sebelum scrubber jalan.
+#       (b) FILTER scrubber: hanya rename Android.bp yang path nya
+#           match /tests?/ atau /vts/ atau /mts/ atau /cts/ atau /sts/.
+#           Modul utama (top-level Android.bp) JANGAN di-rename.
+#       (c) ITERATION GUARD: kalau bp error di iterasi BUKAN test path,
+#           ABORT scrubber (jangan rename file modul utama).
+#       (d) TIER 0 EXPAND: tambah folder tests/vts yang error sekarang.
 # ============================================================================
 
 on:
@@ -25,14 +43,13 @@ jobs:
     runs-on: ubuntu-22.04
     timeout-minutes: 350
 
-    # Set TMPDIR & HOME global untuk semua step
     env:
       TMPDIR: /mnt/aosp/tmpdir
       TMP: /mnt/aosp/tmpdir
       TEMP: /mnt/aosp/tmpdir
 
     steps:
-      # ---------- Step 1a: Aggressive cleanup (NEW) ----------
+      # ---------- Step 1a: Aggressive cleanup ----------
       - name: Free disk (aggressive)
         uses: jlumbroso/free-disk-space@main
         with:
@@ -42,7 +59,7 @@ jobs:
           haskell: true
           large-packages: true
           docker-images: true
-          swap-storage: false   # easimon akan handle swap
+          swap-storage: false
 
       - name: Disk after jlumbroso cleanup
         run: df -h
@@ -51,9 +68,9 @@ jobs:
       - name: Maximize build space (LVM)
         uses: easimon/maximize-build-space@v10
         with:
-          root-reserve-mb: 8192        # Sisa root 8GB (cleanup sebelumnya sudah agresif)
+          root-reserve-mb: 8192
           swap-size-mb: 16384
-          remove-dotnet: 'false'       # Sudah dihapus jlumbroso
+          remove-dotnet: 'false'
           remove-android: 'false'
           remove-haskell: 'false'
           remove-codeql: 'true'
@@ -65,20 +82,14 @@ jobs:
           df -h
           free -h
 
-      # ---------- Step 2: Symlink /tmp ke /mnt/aosp (CRITICAL FIX v5) ----------
+      # ---------- Step 2: Symlink /tmp & /var/tmp ke /mnt/aosp ----------
       - name: Replace /tmp & /var/tmp with symlinks to /mnt/aosp
         run: |
-          # Buat folder target di /mnt/aosp
           sudo mkdir -p /mnt/aosp/tmpdir /mnt/aosp/vartmp /mnt/aosp/aptcache
           sudo chmod 1777 /mnt/aosp/tmpdir /mnt/aosp/vartmp
 
-          # AGGRESSIVE root cleanup — buang large dirs yang jarang dipakai
           echo "=== Sebelum aggressive cleanup ==="
           df -h /
-          sudo du -sh /usr/share/swift /opt/hostedtoolcache /opt/google /opt/microsoft \
-                      /usr/local/lib/node_modules /usr/local/.ghcup \
-                      /usr/local/share/powershell /usr/local/share/chromium \
-                      /usr/share/dotnet /usr/lib/snapd 2>/dev/null || true
           sudo rm -rf \
             /usr/share/swift \
             /opt/hostedtoolcache/PyPy \
@@ -97,36 +108,27 @@ jobs:
             /usr/lib/jvm/temurin-8* \
             /usr/lib/jvm/temurin-11* \
             2>/dev/null || true
-
           echo "=== Setelah aggressive cleanup ==="
           df -h /
 
-          # SYMLINK /tmp & /var/tmp (lebih reliable dari bind mount)
-          # Note: harus stop service yang mungkin pakai /tmp dulu
           sudo systemctl stop snapd.service snapd.socket 2>/dev/null || true
-
-          # Pindah isi /tmp & /var/tmp yang ada (kalau ada) ke target
           sudo rm -rf /tmp.old /var/tmp.old 2>/dev/null || true
           sudo mv /tmp /tmp.old
           sudo mv /var/tmp /var/tmp.old
           sudo ln -s /mnt/aosp/tmpdir /tmp
           sudo ln -s /mnt/aosp/vartmp /var/tmp
-          # Pindah apt cache juga
           sudo rm -rf /var/cache/apt/archives
           sudo ln -s /mnt/aosp/aptcache /var/cache/apt/archives
 
-          # Verifikasi
           echo "=== Verifikasi symlinks ==="
           ls -la /tmp /var/tmp /var/cache/apt/archives
-          echo "=== Test tulis ke /tmp ==="
           echo "test" > /tmp/test.txt && cat /tmp/test.txt && rm /tmp/test.txt
           echo "Symlink target /tmp -> $(readlink -f /tmp)"
           echo "Symlink target /var/tmp -> $(readlink -f /var/tmp)"
           df -h /tmp /var/tmp
-          echo "=== Inode check ==="
           df -i /mnt/aosp /
 
-      # ---------- Step 3: Install build deps + clean cache ----------
+      # ---------- Step 3: Install build deps ----------
       - name: Install AOSP build deps
         run: |
           sudo apt-get update -qq
@@ -143,52 +145,266 @@ jobs:
       - name: Disk after install
         run: df -h
 
-      # ---------- Step 4: Setup HOME, repo tool — semua di /mnt/aosp ----------
+      # ---------- Step 4: Setup HOME & repo tool ----------
       - name: Setup HOME & repo tool
         run: |
-          # Pindah HOME ke /mnt/aosp untuk hindari root partition
           mkdir -p /mnt/aosp/home
           echo "HOME=/mnt/aosp/home" >> $GITHUB_ENV
-          
-          # Install repo tool
+
           mkdir -p /mnt/aosp/bin
           curl -s https://storage.googleapis.com/git-repo-downloads/repo > /mnt/aosp/bin/repo
           chmod a+x /mnt/aosp/bin/repo
           echo "/mnt/aosp/bin" >> $GITHUB_PATH
-          
-          # Git config global -> /mnt/aosp/home/.gitconfig
+
           HOME=/mnt/aosp/home git config --global user.email "santuyajah6@gmail.com"
           HOME=/mnt/aosp/home git config --global user.name "Santuyajah"
           HOME=/mnt/aosp/home git config --global color.ui false
-          # Make git also use /mnt/aosp for temp objects
           HOME=/mnt/aosp/home git config --global pack.threads 2
 
-      # ---------- Step 5: Repo init (v6: pakai group filter untuk skip CTS/VTS/PDK) ----------
-      - name: Repo init
+      # ---------- Step 5: Repo init (v9.2: no -g filter, terbukti perlu di android16) ----------
+      - name: Repo init (no group filter)
         working-directory: /mnt/aosp
         run: |
-          # -g default,-pdk,-pdk-cw,-pdk-fs,-cts,-vts,-tests
-          #   = sync semua project DEFAULT, MINUS group test/PDK
-          #   Ini hemat ~50-70GB disk (CTS/VTS/PDK isinya test files & prebuilts non-essential)
+          # v9.2 KEY FINDING (dari run v9.1):
+          #   -g default        -> 22 projects (FAIL: hardware/interfaces missing)
+          #   -g all,-notdefault -> 22 projects (FAIL: SAMA SEPERTI default)
+          #   tanpa -g          -> 1010 projects (OK: hardware/interfaces ADA)
+          # Kesimpulan: di branch android16-qpr2-release, sistem group sudah
+          # berbeda total. Bahkan tag "all" tidak match. Solusi: skip -g.
+          # Trade-off: sync lebih besar (~30-50GB extra). Kompensasi via
+          # aggressive rm -rf post-sync (Step 8).
           /mnt/aosp/bin/repo init \
             -u https://android.googlesource.com/platform/manifest \
             -b ${{ github.event.inputs.aosp_branch }} \
-            -g default,-pdk,-pdk-cw,-pdk-fs,-cts,-vts,-tests \
             --depth=1 --no-tags --no-clone-bundle
 
-      # ---------- Step 6: Minimal local manifest ----------
-      - name: Apply minimal local manifest
+      # ---------- Step 6: Local manifest (v9.3: AGGRESSIVE prune ~60GB) ----------
+      # v9.3 KEY FIX:
+      #   v9.1 sync gagal: "No space left on device" di /mnt/aosp (101G full)
+      #   Tanpa -g filter, sync ~99GB. Build perlu 50GB + ccache 8GB = total ~157GB.
+      #   GHA max 101GB -> kurang ~56GB. Harus prune ~60GB di sync time.
+      # 
+      # Strategy: pakai optional="true" (terbukti aman di v9.1) untuk SEMUA
+      # remove. Kalau project tidak ada di manifest, repo skip diam-diam.
+      # 
+      # JANGAN PRUNE (deps camera HAL — confirmed dari Android.bp):
+      #   - system/core, system/libhidl, system/libfmq, system/libbase
+      #   - frameworks/av, frameworks/native (CameraMetadata, gralloc)
+      #   - hardware/libhardware (gralloc HAL header)
+      #   - hardware/interfaces (TARGET kita!)
+      #   - external/jpeg-turbo, external/libyuv, external/tinyxml2,
+      #     external/libexif, external/expat
+      #   - bionic, prebuilts/clang, prebuilts/build-tools, build/*
+      #   - kernel/configs (untuk vintf check)
+      - name: Apply aggressive prune local manifest
         working-directory: /mnt/aosp
         run: |
           mkdir -p .repo/local_manifests
           cat > .repo/local_manifests/skip_safe.xml << 'EOF'
           <?xml version="1.0" encoding="UTF-8"?>
           <manifest>
-            <remove-project name="platform/cts"/>
+            <!-- ===== TIER 1: Test suites (~5GB) — confirmed v7 sukses ===== -->
+            <remove-project name="platform/cts" optional="true"/>
+            <remove-project name="platform/test/cts-root" optional="true"/>
+            <remove-project name="platform/test/mts" optional="true"/>
+            <remove-project name="platform/test/graphics" optional="true"/>
+            <remove-project name="platform/test/vts" optional="true"/>
+            <remove-project name="platform/test/vts-testcase" optional="true"/>
+            <remove-project name="platform/test/dittosuite" optional="true"/>
+            <remove-project name="platform/test/app_compat" optional="true"/>
+            <remove-project name="platform/test/suite_harness" optional="true"/>
+
+            <!-- ===== TIER 2: Toolchain source / alternative langs (~14GB) ===== -->
+            <!-- Kita pakai PREBUILT clang, jadi LLVM/Rust/V8 SOURCE tidak perlu -->
+            <remove-project name="platform/external/llvm-project" optional="true"/>
+            <remove-project name="platform/external/llvm" optional="true"/>
+            <remove-project name="platform/external/clang" optional="true"/>
+            <remove-project name="platform/external/lldb-llvm" optional="true"/>
+            <remove-project name="platform/prebuilts/rust" optional="true"/>
+            <remove-project name="platform/prebuilts/v8" optional="true"/>
+            <remove-project name="platform/external/v8" optional="true"/>
+            <remove-project name="platform/external/swift" optional="true"/>
+            <remove-project name="platform/external/dart" optional="true"/>
+
+            <!-- ===== TIER 3: VNDK — KEEP ALL (v9.5 lesson learned) ===== -->
+            <!-- v9.4 FIX KEMBALIKAN v31 -> error "VNDK 32 not found"
+                 v9.5 LESSON: lunch target cek SEMUA VNDK versions di
+                   PRODUCT_EXTRA_VNDK_VERSIONS=[30,31,32,33,34,35]
+                 Kalau salah satu missing, fail. Solusi: KEEP ALL VNDK.
+                 Total cost: ~15GB. Kompensasi via darwin prune + disable ccache. -->
+            <!-- KEEP: platform/prebuilts/vndk/v30 sd v35 -->
+            <remove-project name="platform/prebuilts/abi-dumps" optional="true"/>
+            <remove-project name="platform/prebuilts/abi-dumps/ndk" optional="true"/>
+            <remove-project name="platform/prebuilts/abi-dumps/platform" optional="true"/>
+            <remove-project name="platform/prebuilts/abi-dumps/vndk" optional="true"/>
+
+            <!-- ===== TIER 4: Browser & web (~7GB) — irrelevant untuk HAL ===== -->
+            <remove-project name="platform/external/chromium-webview" optional="true"/>
+            <remove-project name="platform/external/chromium-libpac" optional="true"/>
+            <remove-project name="platform/external/cronet" optional="true"/>
+
+            <!-- ===== TIER 5: Build/SDK extras (~8GB) ===== -->
+            <remove-project name="platform/prebuilts/fuchsia_sdk" optional="true"/>
+            <remove-project name="platform/prebuilts/qemu-kernel" optional="true"/>
+            <remove-project name="platform/prebuilts/maven_repo/android" optional="true"/>
+            <remove-project name="platform/prebuilts/maven_repo/bumblebee" optional="true"/>
+            <remove-project name="platform/prebuilts/cmake" optional="true"/>
+            <remove-project name="platform/prebuilts/cmake-linux" optional="true"/>
+            <remove-project name="platform/prebuilts/cmake-darwin" optional="true"/>
+            <remove-project name="platform/prebuilts/ndk" optional="true"/>
+            <remove-project name="platform/prebuilts/sdk" optional="true"/>
+            <remove-project name="platform/prebuilts/runtime" optional="true"/>
+            <remove-project name="platform/prebuilts/asuite" optional="true"/>
+
+            <!-- ===== TIER 6: Apps tidak relevan (~5GB) ===== -->
+            <remove-project name="platform/packages/apps/Chrome" optional="true"/>
+            <remove-project name="platform/packages/apps/Browser2" optional="true"/>
+            <remove-project name="platform/packages/apps/Bluetooth" optional="true"/>
+            <remove-project name="platform/packages/apps/EmergencyInfo" optional="true"/>
+            <remove-project name="platform/packages/apps/Gallery2" optional="true"/>
+            <remove-project name="platform/packages/apps/Music" optional="true"/>
+            <remove-project name="platform/packages/apps/Calendar" optional="true"/>
+            <remove-project name="platform/packages/apps/DeskClock" optional="true"/>
+            <remove-project name="platform/packages/apps/Email" optional="true"/>
+            <remove-project name="platform/packages/apps/Messaging" optional="true"/>
+
+            <!-- ===== TIER 7: Misc (~6GB) ===== -->
+            <remove-project name="platform/developers/build" optional="true"/>
+            <remove-project name="platform/developers/demos" optional="true"/>
+            <remove-project name="platform/developers/samples" optional="true"/>
+            <remove-project name="platform/developers/docs" optional="true"/>
+            <remove-project name="platform/developers/samples/android" optional="true"/>
+            <remove-project name="platform/docs/source.android.com" optional="true"/>
+            <remove-project name="platform/external/perfetto" optional="true"/>
+            <remove-project name="platform/external/skia" optional="true"/>
+            <remove-project name="platform/external/skqp" optional="true"/>
+            <remove-project name="platform/frameworks/wilhelm" optional="true"/>
+            <remove-project name="platform/frameworks/opt/photoviewer" optional="true"/>
+
+            <!-- ===== TIER 8 (v9.5): Extra prune ~10GB untuk kompensasi VNDK kembali ===== -->
+            <!-- Darwin prebuilts: kita build di linux-x86_64, darwin tidak dipakai -->
+            <remove-project name="platform/prebuilts/clang-darwin" optional="true"/>
+            <remove-project name="platform/prebuilts/build-tools-darwin" optional="true"/>
+            <remove-project name="platform/prebuilts/python-darwin" optional="true"/>
+            <remove-project name="platform/prebuilts/go/darwin-x86" optional="true"/>
+            <!-- Kernel binaries: kita tidak build kernel di sini, kernel sudah ada di HP -->
+            <remove-project name="platform/prebuilts/kernel/x86_64" optional="true"/>
+            <remove-project name="platform/prebuilts/kernel/arm64" optional="true"/>
+            <!-- Extra apps non-essential -->
+            <remove-project name="platform/packages/apps/Contacts" optional="true"/>
+            <remove-project name="platform/packages/apps/Dialer" optional="true"/>
+            <remove-project name="platform/packages/apps/TV" optional="true"/>
+            <remove-project name="platform/packages/apps/CarrierConfig" optional="true"/>
+            <remove-project name="platform/packages/apps/UniversalMediaPlayer" optional="true"/>
+            <remove-project name="platform/packages/apps/Settings" optional="true"/>
+            <remove-project name="platform/packages/apps/SystemUI" optional="true"/>
+            <remove-project name="platform/packages/apps/Launcher3" optional="true"/>
+            <!-- Extra non-essential externals (verified safe for camera HAL):
+                 NOTE: TIDAK PRUNE icu/boringssl/conscrypt — transitive deps via libbase -->
+            <remove-project name="platform/external/grpc-grpc" optional="true"/>
+            <remove-project name="platform/external/grpc-grpc-java" optional="true"/>
+            <remove-project name="platform/external/tensorflow" optional="true"/>
+            <remove-project name="platform/external/sonivox" optional="true"/>
+
+            <!-- ===== TIER 9 (v9.6): RenderScript compiler chain ~5GB ===== -->
+            <!-- Error v9.5 di soong bootstrap:
+                   frameworks/compile/mclinker/tools/mcld/Android.bp:29:1:
+                     unrecognized module type "llvm_tblgen"
+                   frameworks/compile/slang/Android.bp:158:1: unrecognized module type "llvm_tblgen"
+                 Sebab: llvm_tblgen didefinisikan di external/llvm-project yang kita prune.
+                 Solusi: prune juga mclinker + slang yang reference module type tsb.
+                 Camera HAL TIDAK pakai RenderScript chain ini. -->
+            <remove-project name="platform/frameworks/compile/mclinker" optional="true"/>
+            <remove-project name="platform/frameworks/compile/slang" optional="true"/>
+            <remove-project name="platform/frameworks/compile/libbcc" optional="true"/>
+            <remove-project name="platform/frameworks/rs" optional="true"/>
           </manifest>
           EOF
+          echo "=== Local manifest content ==="
+          cat .repo/local_manifests/skip_safe.xml
+          echo ""
+          echo "=== Total remove-project entries ==="
+          grep -c '<remove-project' .repo/local_manifests/skip_safe.xml
 
-      # ---------- Step 7a: Memory monitor (background) ----------
+      # ---------- Step 6b: Pre-sync manifest validation (v9.3: cek prune efektif) ----------
+      - name: Pre-sync manifest validation
+        working-directory: /mnt/aosp
+        run: |
+          mkdir -p /mnt/aosp/logs
+          echo "=== Dump manifest ==="
+          /mnt/aosp/bin/repo manifest -o /mnt/aosp/logs/manifest_dump.xml
+          SIZE=$(stat -c%s /mnt/aosp/logs/manifest_dump.xml)
+          echo "manifest_dump.xml size: ${SIZE} bytes"
+          
+          if [ "$SIZE" -lt 50000 ]; then
+            echo "WARNING: manifest size suspiciously small (${SIZE} bytes)"
+            echo "Expected: ~80000-99000 bytes after prune"
+          fi
+          
+          echo ""
+          echo "=== Cek apakah platform/hardware/interfaces ada di manifest ==="
+          if grep -q 'name="platform/hardware/interfaces"' /mnt/aosp/logs/manifest_dump.xml; then
+            echo "OK: platform/hardware/interfaces TERMASUK"
+          else
+            echo "FATAL: platform/hardware/interfaces TIDAK ADA"
+            echo "=== List semua project (sample 100) ==="
+            grep -oE 'name="[^"]+"' /mnt/aosp/logs/manifest_dump.xml | head -100
+            exit 1
+          fi
+          
+          echo ""
+          echo "=== Verifikasi project KRITIS (deps camera HAL) masih ADA ==="
+          CRITICAL_DEPS="platform/system/core platform/system/libhidl platform/system/libfmq platform/system/libbase platform/frameworks/av platform/frameworks/native platform/hardware/libhardware platform/external/jpeg-turbo platform/external/libyuv platform/external/tinyxml2 platform/bionic platform/build platform/build_bazel"
+          MISSING_CRITICAL=0
+          for dep in $CRITICAL_DEPS; do
+            if grep -q "name=\"$dep\"" /mnt/aosp/logs/manifest_dump.xml; then
+              echo "  OK: $dep"
+            else
+              echo "  WARN: $dep TIDAK ADA (mungkin di-rename, akan cek post-sync)"
+              MISSING_CRITICAL=$((MISSING_CRITICAL+1))
+            fi
+          done
+          
+          echo ""
+          echo "=== Verifikasi project yang HARUS DI-PRUNE benar-benar ter-prune ==="
+          PRUNED_TARGETS="platform/prebuilts/rust platform/external/llvm-project platform/external/chromium-webview platform/prebuilts/abi-dumps platform/prebuilts/clang-darwin"
+          for tgt in $PRUNED_TARGETS; do
+            if grep -q "name=\"$tgt\"" /mnt/aosp/logs/manifest_dump.xml; then
+              echo "  WARN: $tgt MASIH ADA (prune tidak match nama project)"
+            else
+              echo "  OK: $tgt PRUNED"
+            fi
+          done
+
+          echo ""
+          echo "=== Verifikasi VNDK v30-v35 SEMUANYA dipertahankan (v9.5 fix) ==="
+          for v in 30 31 32 33 34 35; do
+            if grep -q "name=\"platform/prebuilts/vndk/v${v}\"" /mnt/aosp/logs/manifest_dump.xml; then
+              echo "  OK: vndk/v${v} TERMASUK"
+            else
+              echo "  WARN: vndk/v${v} TIDAK ADA (mungkin di-rename, akan cek post-sync)"
+            fi
+          done
+          
+          echo ""
+          echo "=== List semua project hardware/* di manifest ==="
+          grep -oE 'name="platform/hardware/[^"]+"' /mnt/aosp/logs/manifest_dump.xml | sort -u | head -50
+          
+          echo ""
+          echo "=== Total project di manifest ==="
+          PROJ_COUNT=$(grep -c '<project ' /mnt/aosp/logs/manifest_dump.xml || echo 0)
+          echo "Total: $PROJ_COUNT projects"
+          if [ "$PROJ_COUNT" -lt 100 ]; then
+            echo "FATAL: project count terlalu sedikit ($PROJ_COUNT). Expected: ~900+"
+            exit 1
+          fi
+          if [ "$PROJ_COUNT" -gt 1100 ]; then
+            echo "WARN: project count > 1100 ($PROJ_COUNT). Prune mungkin tidak efektif."
+            echo "      Expected setelah prune ~60GB: ~900-960 projects."
+          fi
+          echo "PASSED: manifest validation OK"
+
+      # ---------- Step 7a: Memory monitor ----------
       - name: Start memory monitor
         run: |
           mkdir -p /mnt/aosp/logs
@@ -198,8 +414,8 @@ jobs:
            done) &
           echo $! > /mnt/aosp/logs/monitor.pid
 
-      # ---------- Step 7b: Repo sync dengan retry ----------
-      - name: Repo sync (with retry)
+      # ---------- Step 7b: Repo sync (--fail-fast) ----------
+      - name: Repo sync (with retry & fail-fast)
         working-directory: /mnt/aosp
         run: |
           set +e
@@ -207,7 +423,6 @@ jobs:
           for i in $(seq 1 $MAX_RETRY); do
             echo "===== Sync attempt $i / $MAX_RETRY ====="
             df -h | head -4
-            # Early warning: cek free space sebelum mulai
             FREE_AOSP_GB=$(df -BG /mnt/aosp | tail -1 | awk '{print $4}' | tr -d 'G')
             echo "Free di /mnt/aosp sebelum sync: ${FREE_AOSP_GB}G"
             if [ "$FREE_AOSP_GB" -lt 50 ]; then
@@ -215,7 +430,7 @@ jobs:
             fi
             /mnt/aosp/bin/repo sync \
               -c -j2 --force-sync --no-clone-bundle \
-              --no-tags --optimized-fetch
+              --no-tags --optimized-fetch --fail-fast
             RC=$?
             if [ $RC -eq 0 ]; then
               echo "===== Sync sukses di attempt $i ====="
@@ -243,38 +458,461 @@ jobs:
         if: always()
         run: df -h
 
-      # ---------- Step 8: Post-sync cleanup ----------
-      - name: Post-sync cleanup
+      # ---------- Step 8: Post-sync cleanup (v9.1: aggressive size cap) ----------
+      # v9.1: pindah size cap ke sini, dari local_manifest yang error-prone.
+      # rm -rf aman: kalau folder tidak ada, skip diam-diam.
+      - name: Post-sync cleanup (aggressive size cap)
         working-directory: /mnt/aosp
         run: |
           echo "=== Sebelum cleanup ==="
           du -sh . 2>/dev/null | tail -1
+          df -h /mnt/aosp
           for d in \
-            test/vts test/vts-testcase \
-            external/chromium-webview external/cronet \
-            kernel/common kernel/common-modules \
-            prebuilts/abi-dumps external/llvm-project \
-            prebuilts/fuchsia_sdk developers docs tools/test cts ; do
-            [ -e "$d" ] && rm -rf "$d" && echo "Removed $d"
+            external/chromium-webview \
+            external/cronet \
+            external/llvm-project \
+            external/llvm \
+            external/clang \
+            kernel/common \
+            kernel/common-modules \
+            prebuilts/abi-dumps \
+            prebuilts/fuchsia_sdk \
+            prebuilts/qemu-kernel \
+            prebuilts/cmake \
+            prebuilts/ndk \
+            prebuilts/maven_repo \
+            prebuilts/sdk \
+            developers \
+            docs \
+            cts \
+            test/cts-root \
+            test/mts \
+            test/graphics ; do
+            if [ -e "$d" ]; then
+              SIZE=$(du -sh "$d" 2>/dev/null | cut -f1)
+              rm -rf "$d" && echo "Removed $d (was $SIZE)"
+            fi
           done
           echo "=== Setelah cleanup ==="
           du -sh . 2>/dev/null | tail -1
           df -h /mnt/aosp
 
+      # ---------- Step 8a-PRE (v9.9): Preemptive nuke test folders ----------
+      # User error v9.8 menunjukkan: scrubber iteratif tidak segera kena
+      # `framework-connectivity-test-defaults` / `framework-connectivity-internal-test-defaults`
+      # karena error itu di-emit oleh Android.bp di subfolder TESTS yg
+      # me-reuse defaults lain. Cara paling reliable: HAPUS subfolder
+      # tests/ secara eksplisit duluan, jangan tunggu scrubber loop.
+      # Folder-folder ini TIDAK dipakai untuk build camera HAL.
+      - name: Preemptive nuke test folders (v9.9 TIER 0)
+        working-directory: /mnt/aosp
+        run: |
+          echo "=========================================================="
+          echo " TIER 0: Eksplisit nuke folder tests yang parse-fail"
+          echo "=========================================================="
+          for d in \
+            packages/modules/Connectivity/tests \
+            packages/modules/Connectivity/Tethering/tests \
+            packages/modules/Connectivity/Tethering/apex \
+            packages/modules/CaptivePortalLogin/tests \
+            packages/modules/NetworkStack/tests \
+            packages/modules/IPsec/tests \
+            packages/modules/DnsResolver/tests \
+            packages/modules/Wifi/framework/tests \
+            packages/modules/Wifi/service/tests \
+            packages/modules/Bluetooth/android/app/tests \
+            packages/modules/Bluetooth/system/blueberry \
+            frameworks/opt/telephony/tests \
+            frameworks/opt/net/wifi/tests \
+            frameworks/base/services/tests \
+            frameworks/base/core/tests \
+            frameworks/base/tests \
+            frameworks/native/services/surfaceflinger/tests \
+            frameworks/native/libs/gui/tests \
+            frameworks/native/libs/renderengine/tests \
+            hardware/interfaces/graphics/composer/2.1/utils/vts \
+            hardware/interfaces/graphics/composer/2.2/utils/vts \
+            hardware/interfaces/graphics/composer/2.3/utils/vts \
+            hardware/interfaces/graphics/composer/2.4/utils/vts \
+            hardware/interfaces/graphics/composer/aidl/vts \
+            hardware/interfaces/graphics/mapper/2.0/utils/vts \
+            hardware/interfaces/graphics/mapper/2.1/utils/vts \
+            hardware/interfaces/graphics/mapper/3.0/utils/vts \
+            hardware/interfaces/graphics/mapper/4.0/utils/vts \
+            hardware/interfaces/graphics/allocator/2.0/utils/vts \
+            hardware/interfaces/graphics/allocator/3.0/utils/vts \
+            hardware/interfaces/graphics/allocator/4.0/utils/vts ; do
+            if [ -d "$d" ]; then
+              SIZE=$(du -sh "$d" 2>/dev/null | cut -f1)
+              rm -rf "$d" && echo "  RM: $d (was $SIZE)"
+            else
+              echo "  skip (tidak ada): $d"
+            fi
+          done
+          echo ""
+          echo "=== Sisa Android.bp yang masih reference test-defaults ==="
+          # Yang reference test-defaults bermasalah TAPI bukan camera, kita tidak peduli
+          # cuma list saja untuk visibility
+          grep -rl 'framework-connectivity-internal-test-defaults\|framework-connectivity-test-defaults' \
+            --include='Android.bp' . 2>/dev/null | head -20 || echo "  (kosong = bagus)"
+
+      # ---------- Step 8a-RESTORE (v9.10): Pulihkan Android.bp.disabled di folder kritis ----------
+      # Antisipasi: kalau v9.9 sebelumnya jalan, mungkin ada Android.bp yg
+      # bukan test ikut ke-rename. Restore dulu sebelum scrubber.
+      # (Untuk run fresh ini no-op, tapi safety net kalau retry pakai cache.)
+      - name: Restore broken Android.bp.disabled di folder kritis (v9.10)
+        working-directory: /mnt/aosp
+        run: |
+          echo "=== Restore Android.bp.disabled di folder DEPS camera HAL ==="
+          # Folder yg DI-PERLUKAN untuk build camera external HAL — JANGAN sentuh:
+          KRITIS=(
+            "frameworks/native/libs"
+            "frameworks/native/services/surfaceflinger"
+            "frameworks/av/camera"
+            "frameworks/av/services/camera"
+            "frameworks/av/media/libstagefright/foundation"
+            "hardware/interfaces/camera"
+            "hardware/interfaces/graphics/composer"
+            "hardware/interfaces/graphics/mapper"
+            "hardware/interfaces/graphics/allocator"
+            "hardware/interfaces/graphics/common"
+            "hardware/libhardware"
+            "system/core"
+            "system/libhidl"
+            "system/libfmq"
+            "system/libbase"
+            "system/security"
+            "external/jpeg-turbo"
+            "external/libyuv"
+            "external/tinyxml2"
+            "external/libexif"
+            "external/expat"
+            "bionic"
+            "build"
+          )
+          RESTORED=0
+          for base in "${KRITIS[@]}"; do
+            if [ -d "$base" ]; then
+              # Hanya restore yg BUKAN di subfolder tests/vts/cts/mts/sts
+              while IFS= read -r f; do
+                # Jangan restore kalau path mengandung /tests?/, /vts/, /mts/, /cts/, /sts/
+                if echo "$f" | grep -qE '/tests?/|/vts/|/mts/|/cts/|/sts/|/benchmarks?/'; then
+                  continue
+                fi
+                ORIG="${f%.disabled}"
+                mv "$f" "$ORIG" && RESTORED=$((RESTORED+1))
+              done < <(find "$base" -name "Android.bp.disabled" 2>/dev/null)
+            fi
+          done
+          echo "Restored $RESTORED Android.bp di folder kritis (non-test)"
+
+      # ---------- Step 8a (v9.10): Iterative broken-bp scrubber dengan FILTER KETAT ----------
+      # v9.10 KEY CHANGE:
+      #   - Hanya rename Android.bp yang path-nya match REGEX TEST_PATHS
+      #     (mengandung /tests?/, /vts/, /mts/, /cts/, /sts/, /benchmarks?/)
+      #   - Modul utama (top-level Android.bp di frameworks/native/libs/...,
+      #     frameworks/native/services/..., hardware/interfaces/camera/, dll)
+      #     JANGAN PERNAH di-rename, walau ada dependency error.
+      #   - Kalau bootstrap masih error tapi error file BUKAN test path,
+      #     scrubber STOP & laporkan ke log (build pasti gagal, biar diagnostik
+      #     manual saja, jangan auto-disable file modul utama).
+      - name: Iterative broken-bp scrubber STRICT (v9.10)
+        working-directory: /mnt/aosp
+        run: |
+          # Regex untuk path TEST/VTS/etc — boleh di-rename
+          TEST_PATH_REGEX='/tests?/|/vts/|/mts/|/cts/|/sts/|/benchmarks?/|/fuzz(er)?s?/|/perftests?/'
+
+          # Helper: cek apakah file path adalah test path (bisa di-rename)
+          is_test_path() {
+            echo "$1" | grep -qE "$TEST_PATH_REGEX"
+          }
+
+          # Helper: cek apakah file path harus DI-LINDUNGI (modul kritis)
+          is_protected() {
+            echo "$1" | grep -qE 'hardware/interfaces/camera/(provider|device|common)/(default|[0-9])|hardware/libhardware/include/hardware/camera|frameworks/native/libs/(renderengine|gui|ui|nativewindow|sync)/Android\.bp$|frameworks/native/services/surfaceflinger/Android\.bp$|frameworks/av/camera/Android\.bp$'
+          }
+
+          echo "=========================================================="
+          echo " PHASE 1 (v9.10): Initial strip via PATTERNS — TEST PATH ONLY"
+          echo "=========================================================="
+          PATTERNS='"cts_defaults"|"mts_defaults"|"vts_defaults"|"sts_defaults"|"rs_defaults"|"mts-target-sdk-version-current"|"cts-tradefed"|"vts-tradefed"|"mts-tradefed"|"compatibility_test_suite_package"|"test_suite_package"|"csuite-tradefed"|"catbox-tradefed"|"framework-connectivity-test-defaults"|"framework-connectivity-internal-test-defaults"|"framework-connectivity-t-defaults"|"llvm_tblgen"'
+
+          BROKEN_FILES=$(grep -rlE "$PATTERNS" --include="Android.bp" \
+            --exclude-dir=".repo" \
+            . 2>/dev/null || true)
+
+          INITIAL_COUNT=0
+          SKIPPED_NON_TEST=0
+          for f in $BROKEN_FILES; do
+            if is_protected "$f"; then
+              continue
+            fi
+            if ! is_test_path "$f"; then
+              # File punya pattern tapi BUKAN di test path -> SKIP, jangan rename
+              SKIPPED_NON_TEST=$((SKIPPED_NON_TEST+1))
+              continue
+            fi
+            mv "$f" "${f}.disabled"
+            INITIAL_COUNT=$((INITIAL_COUNT+1))
+          done
+          echo "Initial pass: $INITIAL_COUNT Android.bp di-disabled (test path saja)"
+          echo "Skipped (non-test path, walau match pattern): $SKIPPED_NON_TEST"
+
+          echo ""
+          echo "=========================================================="
+          echo " PHASE 2 (v9.10): Iterative bootstrap-and-fix — STRICT"
+          echo "=========================================================="
+          source build/envsetup.sh
+          lunch ${{ github.event.inputs.build_variant }}
+          export USE_CCACHE=0
+          export ALLOW_MISSING_DEPENDENCIES=true
+
+          MAX_ITER=8
+          ABORT_REASON=""
+          for iter in $(seq 1 $MAX_ITER); do
+            echo ""
+            echo ">>>>> Iteration $iter / $MAX_ITER <<<<<"
+
+            ERR_LOG=/mnt/aosp/logs/bootstrap_err_${iter}.log
+            mkdir -p /mnt/aosp/logs
+
+            timeout 600 m nothing 2>&1 | tee "$ERR_LOG" | tail -100 || true
+
+            BAD_BP=$(grep -oE 'error:\s+([a-zA-Z0-9_/.-]+/Android\.bp):' "$ERR_LOG" | \
+                     sed -E 's/error:\s+//;s/:$//' | sort -u || true)
+
+            if [ -z "$BAD_BP" ]; then
+              if grep -q "soong bootstrap failed" "$ERR_LOG"; then
+                echo "Bootstrap masih fail tapi tidak ada error Android.bp."
+                ABORT_REASON="bootstrap_fail_no_bp_error"
+                tail -50 "$ERR_LOG"
+                break
+              fi
+              echo "✓ Bootstrap PASS"
+              break
+            fi
+
+            # Rename hanya yg di test path & tidak protected
+            BP_COUNT=0
+            FOUND_NON_TEST=0
+            for bp in $BAD_BP; do
+              [ ! -f "$bp" ] && continue
+
+              if is_protected "$bp"; then
+                echo "  PROTECTED (refuse to disable): $bp"
+                FOUND_NON_TEST=1
+                continue
+              fi
+
+              if ! is_test_path "$bp"; then
+                # Error ada di file modul UTAMA (non-test) -> jangan disable.
+                echo "  NON-TEST PATH error (refuse to disable): $bp"
+                FOUND_NON_TEST=1
+                continue
+              fi
+
+              echo "  Disabling (test path): $bp"
+              mv "$bp" "${bp}.disabled"
+              BP_COUNT=$((BP_COUNT+1))
+            done
+            echo "Iteration $iter: disabled $BP_COUNT Android.bp (test path)"
+
+            if [ "$BP_COUNT" -eq 0 ]; then
+              if [ "$FOUND_NON_TEST" -eq 1 ]; then
+                echo "ABORT: ada error di non-test path. Tidak bisa auto-fix."
+                ABORT_REASON="non_test_error"
+                break
+              fi
+              echo "Tidak ada bp baru untuk disable, stop."
+              break
+            fi
+          done
+
+          echo ""
+          echo "=========================================================="
+          echo " PHASE 3 (v9.10): Final verification"
+          echo "=========================================================="
+          if [ -n "$ABORT_REASON" ]; then
+            echo "Scrubber STOP karena: $ABORT_REASON"
+            echo ""
+            echo "=== Last bootstrap_err tail ==="
+            ls -t /mnt/aosp/logs/bootstrap_err_*.log 2>/dev/null | head -1 | xargs tail -80 || true
+          fi
+
+          echo ""
+          echo "=== Konfirmasi camera HAL Android.bp masih ada ==="
+          ls -la hardware/interfaces/camera/provider/default/Android.bp
+          ls -la hardware/interfaces/camera/device/default/Android.bp
+          echo ""
+          echo "=== Total Android.bp.disabled yg dibuat ==="
+          find . -name "Android.bp.disabled" -not -path "./.repo/*" 2>/dev/null | wc -l
+          echo ""
+          echo "=== Sanity: file kunci modul UTAMA harus tetap ada ==="
+          for f in \
+            frameworks/native/libs/renderengine/Android.bp \
+            frameworks/native/services/surfaceflinger/Android.bp \
+            frameworks/native/libs/gui/Android.bp \
+            frameworks/native/libs/ui/Android.bp ; do
+            if [ -f "$f" ]; then
+              echo "  OK: $f"
+            else
+              echo "  MISSING: $f (PROBLEM!)"
+            fi
+          done
+
+      # ---------- Step 8b: Diagnose hardware tree ----------
+      - name: Diagnose hardware tree (BEFORE Verify)
+        working-directory: /mnt/aosp
+        run: |
+          echo "============================================================"
+          echo " DIAGNOSTIC: Hardware Tree State After Sync"
+          echo "============================================================"
+
+          echo ""
+          echo "--- 1. /mnt/aosp top level ---"
+          ls /mnt/aosp 2>&1 | head -50
+
+          echo ""
+          echo "--- 2. /mnt/aosp/hardware ---"
+          ls /mnt/aosp/hardware 2>&1 | head -50 || echo "MISSING: /mnt/aosp/hardware"
+
+          echo ""
+          echo "--- 3. /mnt/aosp/hardware/interfaces ---"
+          ls /mnt/aosp/hardware/interfaces 2>&1 | head -50 || echo "MISSING: hardware/interfaces"
+
+          echo ""
+          echo "--- 4. /mnt/aosp/hardware/interfaces/camera ---"
+          ls /mnt/aosp/hardware/interfaces/camera 2>&1 | head -50 || echo "MISSING: hardware/interfaces/camera"
+
+          echo ""
+          echo "--- 5. /mnt/aosp/hardware/interfaces/camera/provider ---"
+          ls /mnt/aosp/hardware/interfaces/camera/provider 2>&1 | head -50 || echo "MISSING: camera/provider"
+
+          echo ""
+          echo "--- 6. /mnt/aosp/hardware/interfaces/camera/device ---"
+          ls /mnt/aosp/hardware/interfaces/camera/device 2>&1 | head -50 || echo "MISSING: camera/device"
+
+          echo ""
+          echo "--- 7. find: semua folder bernama 'camera' (depth<=4) ---"
+          find /mnt/aosp -maxdepth 4 -type d -name "camera" 2>/dev/null | head -30
+
+          echo ""
+          echo "--- 8. find: ExternalCameraProvider.cpp di mana saja ---"
+          find /mnt/aosp -name "ExternalCameraProvider.cpp" 2>/dev/null | head -10
+
+          echo ""
+          echo "--- 9. find: ExternalCameraDevice.cpp di mana saja ---"
+          find /mnt/aosp -name "ExternalCameraDevice.cpp" 2>/dev/null | head -10
+
+          echo ""
+          echo "--- 10. find: file Android.bp di tree camera (depth<=6) ---"
+          find /mnt/aosp/hardware/interfaces/camera -maxdepth 6 -name "Android.bp" 2>/dev/null | head -20 || true
+
+          echo ""
+          echo "--- 11. repo project list (filtered: hardware) ---"
+          /mnt/aosp/bin/repo list 2>/dev/null | grep -E "hardware|HARDWARE" | tee /mnt/aosp/logs/repo_list_hardware.txt | head -50 || true
+
+          echo ""
+          echo "--- 12. repo list TOTAL ---"
+          /mnt/aosp/bin/repo list 2>/dev/null | tee /mnt/aosp/logs/repo_list.txt | wc -l
+          echo "Total project count above"
+
+          echo ""
+          echo "--- 13. Cek status sync untuk hardware/interfaces ---"
+          if [ -d /mnt/aosp/hardware/interfaces ]; then
+            cd /mnt/aosp/hardware/interfaces
+            echo "git status:"
+            git status 2>&1 | head -10 || true
+            echo "git log -1:"
+            git log -1 --oneline 2>&1 || true
+            cd /mnt/aosp
+          else
+            echo "/mnt/aosp/hardware/interfaces TIDAK ADA — sync gagal silent"
+          fi
+
+          echo ""
+          echo "============================================================"
+          echo " END DIAGNOSTIC"
+          echo "============================================================"
+
+      # ---------- Step 8c: Auto-recover hardware/interfaces kalau missing ----------
+      - name: Auto-recover hardware/interfaces (if missing)
+        working-directory: /mnt/aosp
+        run: |
+          if [ ! -d /mnt/aosp/hardware/interfaces/camera/provider/default ]; then
+            echo "=== Folder target missing — coba force-sync platform/hardware/interfaces saja ==="
+            /mnt/aosp/bin/repo sync \
+              -c -j2 --force-sync --no-clone-bundle \
+              --no-tags --optimized-fetch \
+              platform/hardware/interfaces || true
+            echo ""
+            echo "=== Setelah recovery sync ==="
+            ls /mnt/aosp/hardware/interfaces/camera/provider/ 2>&1 | head -20
+            ls /mnt/aosp/hardware/interfaces/camera/device/ 2>&1 | head -20
+          else
+            echo "=== Folder target ADA, skip auto-recovery ==="
+          fi
+
+      # ---------- Step 8d: Upload diagnostic artifacts SEBELUM verify ----------
+      - name: Upload diagnostic artifacts (pre-verify)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: diagnostic-pre-verify
+          path: |
+            /mnt/aosp/logs/manifest_dump.xml
+            /mnt/aosp/logs/repo_list.txt
+            /mnt/aosp/logs/repo_list_hardware.txt
+            /mnt/aosp/logs/monitor.log
+            /mnt/aosp/logs/bootstrap_err_*.log
+          retention-days: 14
+          if-no-files-found: warn
+
+      # ---------- Step 8e: Verify ----------
       - name: Verify external camera HAL source
         working-directory: /mnt/aosp
         run: |
-          echo "=== camera/provider/default/ (lokasi baru Android 13+) ==="
-          ls -la hardware/interfaces/camera/provider/default/ || exit 1
+          MISSING=0
+          echo "=== camera/provider/default/ ==="
+          if ls -la hardware/interfaces/camera/provider/default/ 2>/dev/null | head -30; then
+            echo "OK: provider/default/ ADA"
+          else
+            echo "FATAL: hardware/interfaces/camera/provider/default/ TIDAK ADA"
+            MISSING=1
+          fi
           echo ""
-          echo "=== camera/device/default/ (lokasi baru Android 13+) ==="
-          ls -la hardware/interfaces/camera/device/default/ || exit 1
+          echo "=== camera/device/default/ ==="
+          if ls -la hardware/interfaces/camera/device/default/ 2>/dev/null | head -30; then
+            echo "OK: device/default/ ADA"
+          else
+            echo "FATAL: hardware/interfaces/camera/device/default/ TIDAK ADA"
+            MISSING=1
+          fi
           echo ""
-          echo "=== Konfirmasi source ExternalCameraProvider.cpp ada ==="
-          test -f hardware/interfaces/camera/provider/default/ExternalCameraProvider.cpp && echo "OK" || exit 1
-          test -f hardware/interfaces/camera/device/default/ExternalCameraDevice.cpp && echo "OK" || exit 1
+          echo "=== File-file kunci ==="
+          for f in \
+            hardware/interfaces/camera/provider/default/ExternalCameraProvider.cpp \
+            hardware/interfaces/camera/device/default/ExternalCameraDevice.cpp ; do
+            if [ -f "$f" ]; then
+              echo "OK: $f"
+            else
+              echo "MISSING: $f"
+              MISSING=1
+            fi
+          done
 
-      # ---------- Step 9: Build (v7: module names baru) ----------
+          if [ $MISSING -ne 0 ]; then
+            echo ""
+            echo "=========================================================="
+            echo " VERIFY GAGAL — cek artifact 'diagnostic-pre-verify'"
+            echo " untuk manifest_dump.xml + repo_list_hardware.txt"
+            echo "=========================================================="
+            exit 1
+          fi
+          echo ""
+          echo "=== Verify SUKSES ==="
+
+      # ---------- Step 9: Build (v9.5: ccache disabled untuk hemat 8GB) ----------
       - name: Build external camera HAL
         working-directory: /mnt/aosp
         run: |
@@ -282,24 +920,24 @@ jobs:
           set -o pipefail
           source build/envsetup.sh
           lunch ${{ github.event.inputs.build_variant }}
-          export USE_CCACHE=1
-          export CCACHE_DIR=/mnt/aosp/ccache
-          ccache -M 8G
-          ccache -z
+          # v9.5: ccache DISABLED untuk hemat 8GB disk
+          # Trade-off: build pertama lebih lambat (~2.5 jam vs ~2 jam)
+          # tapi free 8GB extra space untuk out/ artifact
+          export USE_CCACHE=0
+          # Free space monitoring
+          echo "=== Disk before build ==="
+          df -h /mnt/aosp
 
-          # Module names BARU di Android 13+ (was @2.4-external-service):
-          #   android.hardware.camera.provider-V1-external-service  (binary daemon)
-          #   android.hardware.camera.provider-V1-external-impl     (provider .so)
-          #   camera.device-external-impl                            (device .so)
           m -j$(nproc) \
             android.hardware.camera.provider-V1-external-service \
             android.hardware.camera.provider-V1-external-impl \
             camera.device-external-impl \
             2>&1 | tee /mnt/aosp/build.log
 
-          ccache -s
+          echo "=== Disk after build ==="
+          df -h /mnt/aosp
 
-      # ---------- Step 10: Collect (v7: nama baru) ----------
+      # ---------- Step 10: Collect ----------
       - name: Collect artifacts
         working-directory: /mnt/aosp
         run: |
@@ -308,26 +946,21 @@ jobs:
           mkdir -p $GITHUB_WORKSPACE/artifacts/vendor/etc/init
           mkdir -p $GITHUB_WORKSPACE/artifacts/source_reference
 
-          # Binary service (Android 13+ naming)
           find out -type f -name "android.hardware.camera.provider-V1-external-service" \
             -not -path "*/symbols/*" -not -path "*/unstripped/*" \
             -exec cp -v {} $GITHUB_WORKSPACE/artifacts/vendor/bin/hw/ \;
 
-          # Provider impl .so
           find out -type f -name "android.hardware.camera.provider-V1-external-impl.so" \
             -not -path "*/symbols/*" -not -path "*/unstripped/*" \
             -exec cp -v {} $GITHUB_WORKSPACE/artifacts/vendor/lib64/hw/ \;
 
-          # Device impl .so
           find out -type f -name "camera.device-external-impl.so" \
             -not -path "*/symbols/*" -not -path "*/unstripped/*" \
             -exec cp -v {} $GITHUB_WORKSPACE/artifacts/vendor/lib64/hw/ \;
 
-          # Init RC files
           find out -type f -name "android.hardware.camera.provider-V1-external-service*.rc" \
             -exec cp -v {} $GITHUB_WORKSPACE/artifacts/vendor/etc/init/ \; 2>/dev/null || true
 
-          # Source reference: copy untuk inspect Phase 4B (Android.bp, .te, manifest fragments)
           cp -v hardware/interfaces/camera/provider/default/Android.bp \
             $GITHUB_WORKSPACE/artifacts/source_reference/provider_Android.bp 2>/dev/null || true
           cp -v hardware/interfaces/camera/device/default/Android.bp \
@@ -335,11 +968,8 @@ jobs:
           cp -v hardware/interfaces/camera/provider/default/*.rc \
             $GITHUB_WORKSPACE/artifacts/source_reference/ 2>/dev/null || true
 
-          # Cari SELinux .te terkait camera
           find . -type f \( -name "hal_camera*.te" -o -name "*camera_external*.te" \) \
             -exec cp -v {} $GITHUB_WORKSPACE/artifacts/source_reference/ \; 2>/dev/null || true
-
-          # Cari VINTF manifest fragments
           find . -type f -name "*camera*external*manifest*.xml" \
             -exec cp -v {} $GITHUB_WORKSPACE/artifacts/source_reference/ \; 2>/dev/null || true
 

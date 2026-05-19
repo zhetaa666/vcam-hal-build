@@ -1,0 +1,244 @@
+name: Build External Camera HAL (AIDL V1) v10.0 (Self-Hosted)
+
+on:
+  workflow_dispatch:
+    inputs:
+      aosp_branch:
+        description: 'AOSP branch (rec: android16-qpr2-release)'
+        required: true
+        default: 'android16-qpr2-release'
+      build_variant:
+        description: 'lunch target'
+        required: true
+        default: 'aosp_arm64-trunk_staging-userdebug'
+
+jobs:
+  build:
+    name: Build External Camera HAL self
+    runs-on: self-hosted # <-- Diubah untuk VPS Anda
+    timeout-minutes: 600 # Waktu diperpanjang untuk VPS
+
+    env:
+      TMPDIR: /mnt/aosp/tmpdir
+      TMP: /mnt/aosp/tmpdir
+      TEMP: /mnt/aosp/tmpdir
+      CCACHE_DIR: /mnt/aosp/.ccache
+
+    steps:
+      - name: Prep Temporary Dirs
+        run: |
+          mkdir -p /mnt/aosp/tmpdir
+          mkdir -p /mnt/aosp/logs
+
+      - name: Install AOSP build deps (Only installs if missing)
+        run: |
+          sudo apt-get update -qq
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
+            git-core gnupg flex bison build-essential zip curl zlib1g-dev \
+            libc6-dev-i386 libncurses-dev x11proto-core-dev libx11-dev \
+            lib32z1-dev libgl1-mesa-dev libxml2-utils xsltproc unzip \
+            fontconfig openjdk-17-jdk python3 python3-pip ccache rsync \
+            libssl-dev bc cpio kmod
+
+      - name: Setup HOME & repo tool
+        run: |
+          mkdir -p /mnt/aosp/home
+          echo "HOME=/mnt/aosp/home" >> $GITHUB_ENV
+
+          mkdir -p /mnt/aosp/bin
+          if [ ! -f /mnt/aosp/bin/repo ]; then
+            curl -s https://storage.googleapis.com/git-repo-downloads/repo > /mnt/aosp/bin/repo
+            chmod a+x /mnt/aosp/bin/repo
+          fi
+          echo "/mnt/aosp/bin" >> $GITHUB_PATH
+
+          HOME=/mnt/aosp/home git config --global user.email "santuyajah6@gmail.com"
+          HOME=/mnt/aosp/home git config --global user.name "Santuyajah"
+          HOME=/mnt/aosp/home git config --global color.ui false
+          HOME=/mnt/aosp/home git config --global pack.threads 4
+
+      - name: Repo init
+        working-directory: /mnt/aosp
+        run: |
+          # Karena space 160GB, kita tetap prune tapi lebih aman
+          /mnt/aosp/bin/repo init \
+            -u https://android.googlesource.com/platform/manifest \
+            -b ${{ github.event.inputs.aosp_branch }} \
+            --depth=1 --no-tags --no-clone-bundle
+
+      - name: Apply aggressive prune local manifest
+        working-directory: /mnt/aosp
+        run: |
+          mkdir -p .repo/local_manifests
+          # Menggunakan filter prune dari script v9.10 Anda
+          cat > .repo/local_manifests/skip_safe.xml << 'EOF'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <manifest>
+            <remove-project name="platform/cts" optional="true"/>
+            <remove-project name="platform/test/cts-root" optional="true"/>
+            <remove-project name="platform/test/mts" optional="true"/>
+            <remove-project name="platform/test/graphics" optional="true"/>
+            <remove-project name="platform/test/vts" optional="true"/>
+            <remove-project name="platform/test/vts-testcase" optional="true"/>
+            <remove-project name="platform/test/dittosuite" optional="true"/>
+            <remove-project name="platform/test/app_compat" optional="true"/>
+            <remove-project name="platform/test/suite_harness" optional="true"/>
+            <remove-project name="platform/external/llvm-project" optional="true"/>
+            <remove-project name="platform/external/llvm" optional="true"/>
+            <remove-project name="platform/external/clang" optional="true"/>
+            <remove-project name="platform/external/lldb-llvm" optional="true"/>
+            <remove-project name="platform/prebuilts/rust" optional="true"/>
+            <remove-project name="platform/prebuilts/v8" optional="true"/>
+            <remove-project name="platform/external/v8" optional="true"/>
+            <remove-project name="platform/external/swift" optional="true"/>
+            <remove-project name="platform/external/dart" optional="true"/>
+            <remove-project name="platform/prebuilts/abi-dumps" optional="true"/>
+            <remove-project name="platform/external/chromium-webview" optional="true"/>
+            <remove-project name="platform/external/chromium-libpac" optional="true"/>
+            <remove-project name="platform/external/cronet" optional="true"/>
+            <remove-project name="platform/prebuilts/fuchsia_sdk" optional="true"/>
+            <remove-project name="platform/prebuilts/qemu-kernel" optional="true"/>
+            <remove-project name="platform/prebuilts/maven_repo/android" optional="true"/>
+            <remove-project name="platform/prebuilts/cmake" optional="true"/>
+            <remove-project name="platform/prebuilts/cmake-linux" optional="true"/>
+            <remove-project name="platform/prebuilts/cmake-darwin" optional="true"/>
+            <remove-project name="platform/prebuilts/ndk" optional="true"/>
+            <remove-project name="platform/prebuilts/sdk" optional="true"/>
+            <remove-project name="platform/prebuilts/asuite" optional="true"/>
+            <remove-project name="platform/docs/source.android.com" optional="true"/>
+            <remove-project name="platform/external/perfetto" optional="true"/>
+            <remove-project name="platform/external/skia" optional="true"/>
+            <remove-project name="platform/external/skqp" optional="true"/>
+            <remove-project name="platform/prebuilts/clang-darwin" optional="true"/>
+            <remove-project name="platform/prebuilts/build-tools-darwin" optional="true"/>
+            <remove-project name="platform/prebuilts/python-darwin" optional="true"/>
+            <remove-project name="platform/prebuilts/go/darwin-x86" optional="true"/>
+            <remove-project name="platform/prebuilts/kernel/x86_64" optional="true"/>
+            <remove-project name="platform/prebuilts/kernel/arm64" optional="true"/>
+            <remove-project name="platform/frameworks/compile/mclinker" optional="true"/>
+            <remove-project name="platform/frameworks/compile/slang" optional="true"/>
+            <remove-project name="platform/frameworks/compile/libbcc" optional="true"/>
+            <remove-project name="platform/frameworks/rs" optional="true"/>
+          </manifest>
+          EOF
+
+      - name: Repo sync (Persistent)
+        working-directory: /mnt/aosp
+        run: |
+          # Sync akan sangat cepat untuk run ke-2 dst karena file sudah ada di VPS
+          /mnt/aosp/bin/repo sync \
+            -c -j4 --force-sync --no-clone-bundle \
+            --no-tags --optimized-fetch --fail-fast
+
+      - name: Preemptive nuke test folders (Menyelesaikan Error Soong)
+        working-directory: /mnt/aosp
+        run: |
+          echo "Menghapus folder test/fuzzing yang menyebabkan error module undefined"
+          for d in \
+            tools/security/fuzzing/orphans/libskia \
+            tools/platform-compat/java/android/compat/testing/app \
+            packages/modules/Connectivity/bpf/tests \
+            packages/modules/Connectivity/tests \
+            packages/modules/Connectivity/Tethering/tests \
+            packages/modules/Connectivity/Tethering/apex \
+            packages/modules/CaptivePortalLogin/tests \
+            packages/modules/NetworkStack/tests \
+            packages/modules/IPsec/tests \
+            packages/modules/DnsResolver/tests \
+            packages/modules/Wifi/framework/tests \
+            packages/modules/Wifi/service/tests \
+            packages/modules/Bluetooth/android/app/tests \
+            packages/modules/Bluetooth/system/blueberry \
+            frameworks/opt/telephony/tests \
+            frameworks/opt/net/wifi/tests \
+            frameworks/base/services/tests \
+            frameworks/base/core/tests \
+            frameworks/base/tests \
+            frameworks/native/services/surfaceflinger/tests \
+            frameworks/native/libs/gui/tests \
+            frameworks/native/libs/renderengine/tests \
+            hardware/interfaces/graphics/composer/2.1/utils/vts \
+            hardware/interfaces/graphics/composer/2.2/utils/vts \
+            hardware/interfaces/graphics/composer/2.3/utils/vts \
+            hardware/interfaces/graphics/composer/2.4/utils/vts \
+            hardware/interfaces/graphics/composer/aidl/vts \
+            hardware/interfaces/graphics/mapper/2.0/utils/vts \
+            hardware/interfaces/graphics/mapper/2.1/utils/vts \
+            hardware/interfaces/graphics/mapper/3.0/utils/vts \
+            hardware/interfaces/graphics/mapper/4.0/utils/vts \
+            hardware/interfaces/graphics/allocator/2.0/utils/vts \
+            hardware/interfaces/graphics/allocator/3.0/utils/vts \
+            hardware/interfaces/graphics/allocator/4.0/utils/vts ; do
+            if [ -d "$d" ]; then
+              rm -rf "$d" && echo "  Dihapus: $d"
+            fi
+          done
+
+      - name: Verify external camera HAL source
+        working-directory: /mnt/aosp
+        run: |
+          MISSING=0
+          for f in \
+            hardware/interfaces/camera/provider/default/ExternalCameraProvider.cpp \
+            hardware/interfaces/camera/device/default/ExternalCameraDevice.cpp ; do
+            if [ -f "$f" ]; then
+              echo "OK: $f"
+            else
+              echo "MISSING: $f"
+              MISSING=1
+            fi
+          done
+          if [ $MISSING -ne 0 ]; then
+            echo "FATAL: Source code Camera HAL tidak ditemukan."
+            exit 1
+          fi
+
+      - name: Build external camera HAL (With CCache)
+        working-directory: /mnt/aosp
+        run: |
+          set -e
+          source build/envsetup.sh
+          lunch ${{ github.event.inputs.build_variant }}
+          
+          # MENGAKTIFKAN CACHE! 
+          # Jika gagal dan di-run ulang, Soong akan skip kompilasi ulang yang sudah sukses
+          export USE_CCACHE=1
+          export CCACHE_EXEC=/usr/bin/ccache
+          ccache -M 20G # Set limit cache 20GB di VPS
+          
+          m -j$(nproc) \
+            android.hardware.camera.provider-V1-external-service \
+            android.hardware.camera.provider-V1-external-impl \
+            camera.device-external-impl \
+            2>&1 | tee /mnt/aosp/build.log
+
+      - name: Collect artifacts
+        working-directory: /mnt/aosp
+        run: |
+          # Membersihkan artifact lama (jika rerun) agar tidak tercampur
+          rm -rf $GITHUB_WORKSPACE/artifacts
+          
+          mkdir -p $GITHUB_WORKSPACE/artifacts/vendor/bin/hw
+          mkdir -p $GITHUB_WORKSPACE/artifacts/vendor/lib64/hw
+          mkdir -p $GITHUB_WORKSPACE/artifacts/vendor/etc/init
+
+          find out -type f -name "android.hardware.camera.provider-V1-external-service" \
+            -not -path "*/symbols/*" -not -path "*/unstripped/*" \
+            -exec cp -v {} $GITHUB_WORKSPACE/artifacts/vendor/bin/hw/ \;
+          find out -type f -name "android.hardware.camera.provider-V1-external-impl.so" \
+            -not -path "*/symbols/*" -not -path "*/unstripped/*" \
+            -exec cp -v {} $GITHUB_WORKSPACE/artifacts/vendor/lib64/hw/ \;
+          find out -type f -name "camera.device-external-impl.so" \
+            -not -path "*/symbols/*" -not -path "*/unstripped/*" \
+            -exec cp -v {} $GITHUB_WORKSPACE/artifacts/vendor/lib64/hw/ \;
+          find out -type f -name "android.hardware.camera.provider-V1-external-service*.rc" \
+            -exec cp -v {} $GITHUB_WORKSPACE/artifacts/vendor/etc/init/ \; 2>/dev/null || true
+
+      - name: Upload HAL artifacts
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: external-camera-hal-arm64
+          path: artifacts/
+          retention-days: 30
+          if-no-files-found: error
