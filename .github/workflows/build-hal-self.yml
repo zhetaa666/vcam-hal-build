@@ -1,10 +1,11 @@
-name: Build External Camera HAL (AIDL V1) v11.0 (Hybrid ZRAM + Anti-OOM)
+name: Build External Camera HAL (AIDL V1) v12.0 (32GB Swap + Extreme GC)
 
 # ============================================================================
-# Phase 9 - Architect Edition: OOM & Disk Exhaustion Mitigation
-# - Memory: 8GB ZRAM (LZO-RLE compression) + 8GB Disk Swap = ~32GB Effective
-# - Storage: Aggressive post-sync GC (Saves ~40GB disk space)
-# - Soong: Single-thread AST Parsing, Bazel disabled, Aggressive Go GC
+# Phase 10 - The Final Boss Edition (OOM Annihilation)
+# - Memory: 32GB Disk Swap + 8GB RAM = 40GB Total (Aman karena disk sisa >40GB)
+# - Storage: Pre-emptive wipe Git Objects & Surgical Strikes pada broken tests
+# - Soong: Extreme Go GC (GOGC=5) -> Paksa bersihkan RAM setiap naik 5%
+# - Threads: Single thread (GOMAXPROCS=1) untuk AST Parser, Dual untuk Clang
 # ============================================================================
 
 on:
@@ -31,9 +32,8 @@ jobs:
       CCACHE_EXEC: /usr/bin/ccache
 
     steps:
- 
-# ---------- Step 1: Disk Space & Memory Architecture ----------
-      - name: Architect Memory & Storage (Fail-safe Swap & Permissions)
+      # ---------- Step 1: Disk Space & Memory Architecture ----------
+      - name: Architect Memory & Storage (32GB Extreme Swap)
         run: |
           echo "[ARCH] Membersihkan sisa environment sebelumnya & Pre-Cleaning Disk..."
           sudo swapoff -a || true
@@ -42,35 +42,25 @@ jobs:
           sudo rm -rf /mnt/aosp/tmpdir
           sudo mkdir -p /mnt/aosp/tmpdir /mnt/aosp/.ccache
           
-          # Hapus sampah Git lama di awal agar SSD lega
+          # Hapus sampah Git lama di awal agar SSD lega (Mengamankan >40GB SSD untuk Swap)
           sudo rm -rf /mnt/aosp/.repo/project-objects || true
           sudo rm -rf /mnt/aosp/.repo/projects || true
           
-          # ==========================================================
-          # FIX: Hapus cache 'Repo' root yang nyangkut di sistem OS
-          # ==========================================================
+          # Hapus cache 'Repo' root yang nyangkut di sistem OS
           sudo rm -f /etc/.repo_gitconfig.json || true
           sudo rm -f ~/.repo_gitconfig.json || true
           
-          # Kembalikan hak akses environment
+          # Kembalikan hak akses environment agar user runner bisa menulis
           sudo chown -R $USER:$USER /mnt/aosp
           sudo chmod 1777 /mnt/aosp/tmpdir /mnt/aosp/.ccache
           
-          echo "[ARCH] Konfigurasi 16GB Disk Swap..."
-          sudo fallocate -l 16G /swapfile || sudo dd if=/dev/zero of=/swapfile bs=1M count=16384
+          echo "[ARCH] Konfigurasi 32GB Disk Swap (The Final Boss Weapon)..."
+          sudo fallocate -l 32G /swapfile || sudo dd if=/dev/zero of=/swapfile bs=1M count=32768
           sudo chmod 600 /swapfile
           sudo mkswap /swapfile
           sudo swapon /swapfile
 
-          echo "[ARCH] Mencoba Setup ZRAM..."
-          sudo modprobe zram || echo "[WARNING] ZRAM tidak ada di Kernel VPS ini."
-          if lsmod | grep -q zram; then
-            sudo zramctl --find --size 8G --algorithm lzo-rle || true
-            sudo mkswap /dev/zram0 || true
-            sudo swapon --priority 100 /dev/zram0 || true
-          fi
-
-          echo "[ARCH] Tweak Kernel VM & Swappiness..."
+          echo "[ARCH] Tweak Kernel VM & Swappiness (Fokus ke Disk Swap)..."
           sudo sysctl vm.swappiness=100 || true
           sudo sysctl vm.watermark_scale_factor=500 || true
           sudo sysctl vm.vfs_cache_pressure=500 || true
@@ -123,17 +113,15 @@ jobs:
         run: |
           /mnt/aosp/bin/repo sync -c -j2 --force-sync --no-clone-bundle --no-tags --optimized-fetch || true
 
-# ---------- Step 4: Storage Reclaimer & Safe Scrubber ----------
+      # ---------- Step 4: Storage Reclaimer & Safe Scrubber ----------
       - name: Reclaim Disk Space & Safe Scrubber
         working-directory: /mnt/aosp
         run: |
-          echo "[ARCH] Menghapus data Git (Project Objects) untuk membebaskan 40GB+ Disk..."
-          # Aman dihapus karena kita tidak commit/push, sangat menghemat SSD
+          echo "[ARCH] Menghapus data Git (Project Objects) tahap akhir..."
           rm -rf .repo/project-objects
           rm -rf .repo/projects
           
           echo "[ARCH] Surgical Strike: Menghapus test folder bermasalah saja..."
-          # Kita hapus yang benar-benar memicu error dependencies (Bukan menghapus semua)
           for d in \
             tools/security/fuzzing/orphans/libskia \
             packages/modules/Connectivity/tests \
@@ -147,6 +135,12 @@ jobs:
             fi
           done
 
+          # Disable folder DeviceAsWebcam yang memicu error sebelumnya
+          if [ -f "packages/services/DeviceAsWebcam/Android.bp" ]; then
+            mv packages/services/DeviceAsWebcam/Android.bp packages/services/DeviceAsWebcam/Android.bp.disabled
+            echo "  Disabled: DeviceAsWebcam"
+          fi
+
           df -h /
 
       # ---------- Step 5: CCache Configuration ----------
@@ -156,7 +150,7 @@ jobs:
           ccache -M 15G
           ccache -s
 
-      # ---------- Step 6: Compilation (Soong Lobotomy) ----------
+      # ---------- Step 6: Compilation (Extreme Soong Tweak) ----------
       - name: Build External Camera HAL
         working-directory: /mnt/aosp
         run: |
@@ -165,22 +159,23 @@ jobs:
           source build/envsetup.sh
           lunch ${{ github.event.inputs.build_variant }}
           
-          # 1. Matikan Bazel (Menghemat RAM 4GB - 8GB)
+          # Matikan Bazel untuk hemat RAM 4GB
           export SOONG_NO_BAZEL=true
           export BUILD_BROKEN_DISABLE_BAZEL=true
           export USE_RBE=false
           
-          # 2. Soong / Golang Tweaks untuk RAM 8GB
-          # GOMEMLIMIT ke 3GB agar menyisakan RAM untuk kernel dan ZRAM buffer
-          export GOMEMLIMIT=3072MiB
-          # GOGC=10 memaksa Go sangat agresif membuang sampah memori
-          export GOGC=10
-          # WAJIB: Hanya 1 core saat parsing agar memori tidak meluap
+          # ========================================================
+          # GOGC=5 : Memaksa Go-lang membersihkan sampah memori 
+          # setiap kali memori terpakai naik 5%. Ini membuat parser
+          # berjalan agak lambat, tapi 100% KEBAS DARI OOM.
+          # ========================================================
+          export GOGC=5
+          export GOMEMLIMIT=4096MiB
           export GOMAXPROCS=1 
           export ALLOW_MISSING_DEPENDENCIES=true
           
-          echo "[ARCH] Memulai kompilasi dengan kontrol thread Ninja: 2 Threads"
-          # -j2 pada `m` memaksa proses C++ (Clang) dan Linking berjalan perlahan tapi pasti
+          echo "[ARCH] Memulai kompilasi dengan 32GB Swap & Agresif GC"
+          # Cukup gunakan -j2 saat memanggil Clang
           m -j2 \
             android.hardware.camera.provider-V1-external-service \
             android.hardware.camera.provider-V1-external-impl \
