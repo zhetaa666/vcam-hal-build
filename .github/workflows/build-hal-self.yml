@@ -1,10 +1,11 @@
-name: Build External Camera HAL (AIDL V1) v10.0 (Self-Hosted VPS)
+name: Build External Camera HAL (AIDL V1) v10.1 (Self-Hosted VPS)
 
 # ============================================================================
-# Phase 5 - Self Hosted VPS Edition (160GB)
+# Phase 6 - Self Hosted VPS Edition (160GB) + LLVM Fix
 # - Menghapus ekstensi LVM dan agresif cleanup yang merusak VPS
 # - Mengaktifkan fitur persistensi / CCache untuk resume jika build gagal
 # - Menyelesaikan error Undefined Module (skia_deps, cts_defaults, bpf)
+# - Menyelesaikan error unrecognized module type "llvm_tblgen"
 # ============================================================================
 
 on:
@@ -22,7 +23,7 @@ on:
 jobs:
   build:
     name: Build External Camera HAL (Self-Hosted)
-    runs-on: self-hosted # Telah diubah dari ubuntu-22.04 ke self-hosted
+    runs-on: self-hosted
     timeout-minutes: 600
 
     env:
@@ -89,7 +90,10 @@ jobs:
             <remove-project name="platform/prebuilts/kernel/arm64" optional="true"/>
             <remove-project name="platform/external/skia" optional="true"/>
             <remove-project name="platform/external/skqp" optional="true"/>
+            <remove-project name="platform/frameworks/compile/mclinker" optional="true"/>
             <remove-project name="platform/frameworks/compile/slang" optional="true"/>
+            <remove-project name="platform/frameworks/compile/libbcc" optional="true"/>
+            <remove-project name="platform/frameworks/rs" optional="true"/>
           </manifest>
           EOF
 
@@ -102,14 +106,18 @@ jobs:
       - name: Preemptive nuke test folders (Menangani Error Soong)
         working-directory: /mnt/aosp
         run: |
-          echo "Nuke folder bermasalah yang menahan dependensi skia_deps dll..."
+          echo "Nuke folder bermasalah yang menahan dependensi skia_deps dan llvm_tblgen..."
           for d in \
             tools/security/fuzzing/orphans/libskia \
             tools/platform-compat/java/android/compat/testing \
             packages/modules/Connectivity/bpf/tests \
             packages/modules/Connectivity/tests \
             packages/modules/NetworkStack/tests \
-            frameworks/native/services/surfaceflinger/tests ; do
+            frameworks/native/services/surfaceflinger/tests \
+            frameworks/compile/mclinker \
+            frameworks/compile/slang \
+            frameworks/compile/libbcc \
+            frameworks/rs ; do
             if [ -d "$d" ]; then
               rm -rf "$d" && echo "  RM: $d"
             fi
