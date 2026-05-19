@@ -1,4 +1,4 @@
-name: Build External Camera HAL (AIDL V1) v10.3 Self-Hosted Resumable
+name: Build External Camera HAL (AIDL V1) v10.4 Self-Hosted Resumable
 
 # ============================================================================
 # Phase 4A v10.2 - VCam Project (Santuyajah) - SELF-HOSTED VPS 160GB
@@ -70,7 +70,7 @@ on:
 
 jobs:
   build:
-    name: Build External Camera HAL (Self-Hosted v10.3, Resumable)
+    name: Build External Camera HAL (Self-Hosted v10.4, Resumable)
     runs-on: self-hosted
     timeout-minutes: 1200
 
@@ -305,9 +305,33 @@ jobs:
             rm -f "$SYNC_MARKER"
           fi
 
+          # ================================================================
+          # FIX v10.4: Auto-detect resume mode
+          # Kalau marker tidak ada TAPI .repo/projects/ sudah berisi banyak
+          # project (>50), itu artinya sync sebelumnya HAMPIR selesai (mungkin
+          # job di-cancel/timeout di tahap "Finalizing sync state").
+          # Tidak perlu full sync ulang - light sync akan auto-complete
+          # project yang masih belum sync.
+          # ================================================================
+          PROJECT_COUNT=0
+          if [ -d .repo/projects ]; then
+            PROJECT_COUNT=$(find .repo/projects -mindepth 1 -maxdepth 6 -name "*.git" -type d 2>/dev/null | wc -l)
+          fi
+          echo "Detected $PROJECT_COUNT project repos di .repo/projects/"
+
+          if [ ! -f "$SYNC_MARKER" ] && [ "$PROJECT_COUNT" -gt 50 ]; then
+            echo ""
+            echo "================================================"
+            echo " AUTO-RESUME: Marker hilang TAPI sudah ada $PROJECT_COUNT project ter-sync"
+            echo " Kemungkinan run sebelumnya cancelled/timeout di Finalizing."
+            echo " Treat sebagai light-sync, BUKAN first-time."
+            echo "================================================"
+            touch "$SYNC_MARKER"
+          fi
+
           if [ -f "$SYNC_MARKER" ]; then
-            echo "Sync sebelumnya sukses. Light-sync incremental..."
-            echo "(Akan tetap fetch project baru / drop project yg dihapus dari manifest)"
+            echo "Light-sync incremental (akan complete project yg belum sync,"
+            echo " fetch project baru, dan skip yang sudah uptodate)..."
             ${AOSP_ROOT}/bin/repo sync \
               -c -j$(nproc) --no-clone-bundle --no-tags --optimized-fetch \
               --fail-fast || {
@@ -316,8 +340,10 @@ jobs:
                   -c -j$(nproc) --force-sync --no-clone-bundle \
                   --no-tags --optimized-fetch --fail-fast
               }
+            # Re-touch marker (sync sukses)
+            touch "$SYNC_MARKER"
           else
-            echo "First-time sync penuh untuk '$BRANCH'..."
+            echo "First-time sync penuh untuk '$BRANCH' (folder kosong)..."
             for i in 1 2 3; do
               echo "===== Attempt $i/3 ====="
               ${AOSP_ROOT}/bin/repo sync \
