@@ -120,18 +120,30 @@ jobs:
         run: |
           /mnt/aosp/bin/repo sync -c -j2 --force-sync --no-clone-bundle --no-tags --optimized-fetch || true
 
-      # ---------- Step 4: Storage Reclaimer (CRUCIAL FOR 160GB DISK) ----------
-      - name: Reclaim Disk Space (Nuke Git Objects)
+# ---------- Step 4: Storage Reclaimer & Safe Scrubber ----------
+      - name: Reclaim Disk Space & Safe Scrubber
         working-directory: /mnt/aosp
         run: |
           echo "[ARCH] Menghapus data Git (Project Objects) untuk membebaskan 40GB+ Disk..."
-          # Aman dihapus karena kita tidak akan commit/push, hanya kompilasi.
+          # Aman dihapus karena kita tidak commit/push, sangat menghemat SSD
           rm -rf .repo/project-objects
           rm -rf .repo/projects
           
-          echo "[ARCH] Menghapus test folder..."
-          find . -type d -name "tests" -exec rm -rf {} + 2>/dev/null || true
-          
+          echo "[ARCH] Surgical Strike: Menghapus test folder bermasalah saja..."
+          # Kita hapus yang benar-benar memicu error dependencies (Bukan menghapus semua)
+          for d in \
+            tools/security/fuzzing/orphans/libskia \
+            packages/modules/Connectivity/tests \
+            frameworks/native/services/surfaceflinger/tests \
+            frameworks/compile/mclinker \
+            frameworks/compile/slang \
+            frameworks/compile/libbcc \
+            trusty ; do
+            if [ -d "$d" ]; then
+              rm -rf "$d" && echo "  Terhapus aman: $d"
+            fi
+          done
+
           df -h /
 
       # ---------- Step 5: CCache Configuration ----------
