@@ -1,4 +1,11 @@
-name: Build External Camera HAL (AIDL V1) v10.2 (Self-Hosted + Anti-OOM)
+name: Build External Camera HAL (AIDL V1) v10.3 (Self-Hosted + Anti-OOM)
+
+# ============================================================================
+# Phase 7 - Self Hosted VPS Edition (160GB)
+# - Swap Memory 24GB untuk mencegah OOM (Killed)
+# - Preemptive nuke untuk LLVM, Skia, dan Trusty (Rust deps)
+# - CCache aktif untuk resume build lebih cepat
+# ============================================================================
 
 on:
   workflow_dispatch:
@@ -41,10 +48,8 @@ jobs:
           SWAP_SIZE=$(free -m | awk '/^Swap:/ {print $2}')
           if [ "$SWAP_SIZE" -lt 20000 ]; then
             echo "Swap kurang dari 20GB. Membuat file swap 24GB..."
-            # Matikan swap lama jika ada
             sudo swapoff -a || true
-            # Buat file swap 24GB (gunakan fallocate karena lebih cepat, fallback ke dd jika gagal)
-            sudo fallocate -l 10G /swapfile || sudo dd if=/dev/zero of=/swapfile bs=1M count=24576
+            sudo fallocate -l 24G /swapfile || sudo dd if=/dev/zero of=/swapfile bs=1M count=24576
             sudo chmod 600 /swapfile
             sudo mkswap /swapfile
             sudo swapon /swapfile
@@ -118,7 +123,7 @@ jobs:
       - name: Preemptive nuke test folders (Menangani Error Soong)
         working-directory: /mnt/aosp
         run: |
-          echo "Nuke folder bermasalah yang menahan dependensi skia_deps dan llvm_tblgen..."
+          echo "Nuke folder bermasalah yang menahan dependensi skia_deps, llvm_tblgen, dan trusty..."
           for d in \
             tools/security/fuzzing/orphans/libskia \
             tools/platform-compat/java/android/compat/testing \
@@ -129,7 +134,8 @@ jobs:
             frameworks/compile/mclinker \
             frameworks/compile/slang \
             frameworks/compile/libbcc \
-            frameworks/rs ; do
+            frameworks/rs \
+            trusty ; do
             if [ -d "$d" ]; then
               rm -rf "$d" && echo "  RM: $d"
             fi
@@ -172,8 +178,6 @@ jobs:
           export USE_CCACHE=1
           export CCACHE_EXEC=/usr/bin/ccache
           export ALLOW_MISSING_DEPENDENCIES=true
-
-          # GOGC membantu meminimalisir penggunaan RAM berlebih oleh Golang saat Soong berjalan
           export GOGC=50
 
           m -j$(nproc) \
