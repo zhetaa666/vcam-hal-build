@@ -32,26 +32,35 @@ jobs:
 
     steps:
 # ---------- Step 1: Disk Space & Memory Architecture ----------
-      - name: Architect Memory & Storage (Fail-safe Swap)
+# ---------- Step 1: Disk Space & Memory Architecture ----------
+      - name: Architect Memory & Storage (Fail-safe Swap & Permissions)
         run: |
           echo "[ARCH] Membersihkan sisa environment sebelumnya & Pre-Cleaning Disk..."
           sudo swapoff -a || true
           sudo rm -f /swapfile || true
-          sudo rm -rf /mnt/aosp/tmpdir && sudo mkdir -p /mnt/aosp/tmpdir
           
-          # Hapus sampah Git lama di awal agar SSD lega sebelum membuat Swap
+          # Hapus menggunakan sudo, lalu buat ulang
+          sudo rm -rf /mnt/aosp/tmpdir
+          sudo mkdir -p /mnt/aosp/tmpdir /mnt/aosp/.ccache
+          
+          # Hapus sampah Git lama di awal agar SSD lega
           sudo rm -rf /mnt/aosp/.repo/project-objects || true
           sudo rm -rf /mnt/aosp/.repo/projects || true
           
-          echo "[ARCH] Konfigurasi 16GB Disk Swap (Sebagai kompensasi ZRAM yang mati)..."
+          # ==========================================================
+          # FIX: KEMBALIKAN HAK AKSES KE USER NORMAL AGAR GO BISA MENULIS
+          # ==========================================================
+          sudo chown -R $USER:$USER /mnt/aosp
+          sudo chmod 1777 /mnt/aosp/tmpdir /mnt/aosp/.ccache
+          
+          echo "[ARCH] Konfigurasi 16GB Disk Swap..."
           sudo fallocate -l 16G /swapfile || sudo dd if=/dev/zero of=/swapfile bs=1M count=16384
           sudo chmod 600 /swapfile
           sudo mkswap /swapfile
           sudo swapon /swapfile
 
-          echo "[ARCH] Mencoba Setup ZRAM (Graceful Fallback jika Kernel VPS tidak support)..."
-          # Menggunakan '|| true' agar workflow tidak terhenti jika modul ZRAM tidak ada
-          sudo modprobe zram || echo "[WARNING] ZRAM tidak ada di Kernel VPS ini. Menggunakan 16GB Disk Swap murni."
+          echo "[ARCH] Mencoba Setup ZRAM..."
+          sudo modprobe zram || echo "[WARNING] ZRAM tidak ada di Kernel VPS ini."
           if lsmod | grep -q zram; then
             sudo zramctl --find --size 8G --algorithm lzo-rle || true
             sudo mkswap /dev/zram0 || true
