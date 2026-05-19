@@ -1,12 +1,4 @@
-name: Build External Camera HAL (AIDL V1) v10.1 (Self-Hosted VPS)
-
-# ============================================================================
-# Phase 6 - Self Hosted VPS Edition (160GB) + LLVM Fix
-# - Menghapus ekstensi LVM dan agresif cleanup yang merusak VPS
-# - Mengaktifkan fitur persistensi / CCache untuk resume jika build gagal
-# - Menyelesaikan error Undefined Module (skia_deps, cts_defaults, bpf)
-# - Menyelesaikan error unrecognized module type "llvm_tblgen"
-# ============================================================================
+name: Build External Camera HAL (AIDL V1) v10.2 (Self-Hosted + Anti-OOM)
 
 on:
   workflow_dispatch:
@@ -41,6 +33,26 @@ jobs:
           sudo chmod 1777 /mnt/aosp/tmpdir /mnt/aosp/vartmp /mnt/aosp/.ccache
           sudo chown -R $USER:$USER /mnt/aosp
           df -h /mnt/aosp
+
+      # ---------- Step 1b: SETUP SWAP MEMORY (ANTI "Killed" / OOM) ----------
+      - name: Setup 24GB Swap Space
+        run: |
+          echo "Mengecek ketersediaan Swap..."
+          SWAP_SIZE=$(free -m | awk '/^Swap:/ {print $2}')
+          if [ "$SWAP_SIZE" -lt 20000 ]; then
+            echo "Swap kurang dari 20GB. Membuat file swap 24GB..."
+            # Matikan swap lama jika ada
+            sudo swapoff -a || true
+            # Buat file swap 24GB (gunakan fallocate karena lebih cepat, fallback ke dd jika gagal)
+            sudo fallocate -l 10G /swapfile || sudo dd if=/dev/zero of=/swapfile bs=1M count=24576
+            sudo chmod 600 /swapfile
+            sudo mkswap /swapfile
+            sudo swapon /swapfile
+            echo "Swap 24GB berhasil diaktifkan!"
+          else
+            echo "Swap sudah memadai ($SWAP_SIZE MB)."
+          fi
+          free -h
 
       # ---------- Step 2: Setup HOME & repo tool ----------
       - name: Setup HOME & repo tool
@@ -126,13 +138,11 @@ jobs:
       - name: Iterative broken-bp scrubber STRICT
         working-directory: /mnt/aosp
         run: |
-          # Ditambahkan regex 'testing' untuk menangani CTS/platform-compat
           TEST_PATH_REGEX='/tests?/|/vts/|/mts/|/cts/|/sts/|/benchmarks?/|/fuzz(er)?s?/|/perftests?/|/testing/'
 
           is_test_path() { echo "$1" | grep -qE "$TEST_PATH_REGEX"; }
           is_protected() { echo "$1" | grep -qE 'hardware/interfaces/camera/|frameworks/native/libs/'; }
 
-          # Ditambahkan connectivity-mainline-presubmit-cc-defaults
           PATTERNS='"cts_defaults"|"mts_defaults"|"vts_defaults"|"sts_defaults"|"framework-connectivity-test-defaults"|"framework-connectivity-internal-test-defaults"|"connectivity-mainline-presubmit-cc-defaults"'
 
           BROKEN_FILES=$(grep -rlE "$PATTERNS" --include="Android.bp" --exclude-dir=".repo" . 2>/dev/null || true)
@@ -159,10 +169,12 @@ jobs:
           source build/envsetup.sh
           lunch ${{ github.event.inputs.build_variant }}
           
-          # Mengaktifkan CCACHE untuk Server VPS yang kapasitasnya mencukupi
           export USE_CCACHE=1
           export CCACHE_EXEC=/usr/bin/ccache
           export ALLOW_MISSING_DEPENDENCIES=true
+
+          # GOGC membantu meminimalisir penggunaan RAM berlebih oleh Golang saat Soong berjalan
+          export GOGC=50
 
           m -j$(nproc) \
             android.hardware.camera.provider-V1-external-service \
