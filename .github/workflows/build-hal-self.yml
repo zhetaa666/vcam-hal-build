@@ -31,30 +31,37 @@ jobs:
       CCACHE_EXEC: /usr/bin/ccache
 
     steps:
-      # ---------- Step 1: Disk Space & Memory Architecture ----------
-      - name: Architect Memory & Storage (ZRAM + Safe Swap)
+# ---------- Step 1: Disk Space & Memory Architecture ----------
+      - name: Architect Memory & Storage (Fail-safe Swap)
         run: |
-          echo "[ARCH] Membersihkan sisa environment sebelumnya..."
+          echo "[ARCH] Membersihkan sisa environment sebelumnya & Pre-Cleaning Disk..."
           sudo swapoff -a || true
           sudo rm -f /swapfile || true
           sudo rm -rf /mnt/aosp/tmpdir && sudo mkdir -p /mnt/aosp/tmpdir
           
-          echo "[ARCH] Konfigurasi 8GB Disk Swap (Aman untuk SSD)..."
-          sudo fallocate -l 8G /swapfile || sudo dd if=/dev/zero of=/swapfile bs=1M count=8192
+          # Hapus sampah Git lama di awal agar SSD lega sebelum membuat Swap
+          sudo rm -rf /mnt/aosp/.repo/project-objects || true
+          sudo rm -rf /mnt/aosp/.repo/projects || true
+          
+          echo "[ARCH] Konfigurasi 16GB Disk Swap (Sebagai kompensasi ZRAM yang mati)..."
+          sudo fallocate -l 16G /swapfile || sudo dd if=/dev/zero of=/swapfile bs=1M count=16384
           sudo chmod 600 /swapfile
           sudo mkswap /swapfile
           sudo swapon /swapfile
 
-          echo "[ARCH] Setup ZRAM (Memory Compression) sebesar 8GB..."
-          sudo modprobe zram
-          sudo zramctl --find --size 8G --algorithm lzo-rle || true
-          sudo mkswap /dev/zram0 || true
-          sudo swapon --priority 100 /dev/zram0 || true
+          echo "[ARCH] Mencoba Setup ZRAM (Graceful Fallback jika Kernel VPS tidak support)..."
+          # Menggunakan '|| true' agar workflow tidak terhenti jika modul ZRAM tidak ada
+          sudo modprobe zram || echo "[WARNING] ZRAM tidak ada di Kernel VPS ini. Menggunakan 16GB Disk Swap murni."
+          if lsmod | grep -q zram; then
+            sudo zramctl --find --size 8G --algorithm lzo-rle || true
+            sudo mkswap /dev/zram0 || true
+            sudo swapon --priority 100 /dev/zram0 || true
+          fi
 
-          echo "[ARCH] Tweak Kernel VM & Swappiness (Fokus ke ZRAM)..."
-          sudo sysctl vm.swappiness=100
-          sudo sysctl vm.watermark_scale_factor=500
-          sudo sysctl vm.vfs_cache_pressure=500
+          echo "[ARCH] Tweak Kernel VM & Swappiness..."
+          sudo sysctl vm.swappiness=100 || true
+          sudo sysctl vm.watermark_scale_factor=500 || true
+          sudo sysctl vm.vfs_cache_pressure=500 || true
           
           free -h
           df -h /mnt/aosp
