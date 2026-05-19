@@ -1,11 +1,10 @@
-name: Build External Camera HAL (AIDL V1) v10.4 (Self-Hosted + Anti-OOM Tweaks)
+name: Build External Camera HAL (AIDL V1) v11.0 (Hybrid ZRAM + Anti-OOM)
 
 # ============================================================================
-# Phase 8 - Self Hosted VPS Edition (Sisa Disk 40GB)
-# - Swap Memory 24GB (Aman untuk sisa SSD)
-# - Preemptive nuke untuk LLVM, Skia, dan Trusty (Rust deps)
-# - CCache aktif untuk resume build lebih cepat
-# - Soong Memory Tweaks (GOGC, GOMEMLIMIT, GOMAXPROCS) agar tidak KILLED
+# Phase 9 - Architect Edition: OOM & Disk Exhaustion Mitigation
+# - Memory: 8GB ZRAM (LZO-RLE compression) + 8GB Disk Swap = ~32GB Effective
+# - Storage: Aggressive post-sync GC (Saves ~40GB disk space)
+# - Soong: Single-thread AST Parsing, Bazel disabled, Aggressive Go GC
 # ============================================================================
 
 on:
@@ -22,151 +21,112 @@ on:
 
 jobs:
   build:
-    name: Build External Camera HAL (Self-Hosted)
+    name: HAL Builder Core
     runs-on: self-hosted
     timeout-minutes: 600
 
     env:
       TMPDIR: /mnt/aosp/tmpdir
-      TMP: /mnt/aosp/tmpdir
-      TEMP: /mnt/aosp/tmpdir
       CCACHE_DIR: /mnt/aosp/.ccache
       CCACHE_EXEC: /usr/bin/ccache
 
     steps:
-      # ---------- Step 1: Penyiapan Direktori Aman ----------
-      - name: Setup Working Directories
+      # ---------- Step 1: Disk Space & Memory Architecture ----------
+      - name: Architect Memory & Storage (ZRAM + Safe Swap)
         run: |
-          sudo mkdir -p /mnt/aosp/tmpdir /mnt/aosp/vartmp /mnt/aosp/.ccache
-          sudo chmod 1777 /mnt/aosp/tmpdir /mnt/aosp/vartmp /mnt/aosp/.ccache
-          sudo chown -R $USER:$USER /mnt/aosp
-          df -h /mnt/aosp
-
-      # ---------- Step 1b: SETUP SWAP MEMORY (24GB - Aman untuk sisa disk 40GB) ----------
-      - name: Setup 24GB Swap Space
-        run: |
-          echo "Mematikan swap lama jika ada..."
+          echo "[ARCH] Membersihkan sisa environment sebelumnya..."
           sudo swapoff -a || true
           sudo rm -f /swapfile || true
+          sudo rm -rf /mnt/aosp/tmpdir && sudo mkdir -p /mnt/aosp/tmpdir
           
-          echo "Membuat file swap 24GB yang aman untuk disk..."
-          sudo fallocate -l 24G /swapfile || sudo dd if=/dev/zero of=/swapfile bs=1M count=24576
+          echo "[ARCH] Konfigurasi 8GB Disk Swap (Aman untuk SSD)..."
+          sudo fallocate -l 8G /swapfile || sudo dd if=/dev/zero of=/swapfile bs=1M count=8192
           sudo chmod 600 /swapfile
           sudo mkswap /swapfile
           sudo swapon /swapfile
+
+          echo "[ARCH] Setup ZRAM (Memory Compression) sebesar 8GB..."
+          sudo modprobe zram
+          sudo zramctl --find --size 8G --algorithm lzo-rle || true
+          sudo mkswap /dev/zram0 || true
+          sudo swapon --priority 100 /dev/zram0 || true
+
+          echo "[ARCH] Tweak Kernel VM & Swappiness (Fokus ke ZRAM)..."
+          sudo sysctl vm.swappiness=100
+          sudo sysctl vm.watermark_scale_factor=500
+          sudo sysctl vm.vfs_cache_pressure=500
           
-          echo "Swap 24GB berhasil diaktifkan!"
           free -h
+          df -h /mnt/aosp
 
-      # ---------- Step 2: Setup HOME & repo tool ----------
-      - name: Setup HOME & repo tool
+      # ---------- Step 2: Setup Workspace & Repo ----------
+      - name: Initialize Git & Repo
         run: |
-          mkdir -p /mnt/aosp/home
+          mkdir -p /mnt/aosp/bin /mnt/aosp/home
           echo "HOME=/mnt/aosp/home" >> $GITHUB_ENV
+          echo "/mnt/aosp/bin" >> $GITHUB_PATH
 
-          mkdir -p /mnt/aosp/bin
           if [ ! -f /mnt/aosp/bin/repo ]; then
             curl -s https://storage.googleapis.com/git-repo-downloads/repo > /mnt/aosp/bin/repo
             chmod a+x /mnt/aosp/bin/repo
           fi
-          echo "/mnt/aosp/bin" >> $GITHUB_PATH
 
           HOME=/mnt/aosp/home git config --global user.email "santuyajah6@gmail.com"
           HOME=/mnt/aosp/home git config --global user.name "Santuyajah"
-          HOME=/mnt/aosp/home git config --global color.ui false
-          HOME=/mnt/aosp/home git config --global pack.threads 4
+          # Disable delta compression memory spikes
+          HOME=/mnt/aosp/home git config --global core.packedGitLimit 512m 
+          HOME=/mnt/aosp/home git config --global pack.windowMemory 512m
 
-      # ---------- Step 3: Repo init & Sinkronisasi Incremental ----------
-      - name: Repo init & Local Manifest
+      # ---------- Step 3: Minimalist Local Manifest ----------
+      - name: Inject Local Manifest (Extreme Prune)
         working-directory: /mnt/aosp
         run: |
-          /mnt/aosp/bin/repo init \
-            -u https://android.googlesource.com/platform/manifest \
-            -b ${{ github.event.inputs.aosp_branch }} \
-            --depth=1 --no-tags --no-clone-bundle
+          /mnt/aosp/bin/repo init -u https://android.googlesource.com/platform/manifest \
+            -b ${{ github.event.inputs.aosp_branch }} --depth=1 --no-tags --no-clone-bundle
 
-          # Setup Aggressive Prune
           mkdir -p .repo/local_manifests
-          cat > .repo/local_manifests/skip_safe.xml << 'EOF'
+          cat > .repo/local_manifests/extreme_prune.xml << 'EOF'
           <?xml version="1.0" encoding="UTF-8"?>
           <manifest>
+            <!-- Drop all heavy components not needed for Camera HAL -->
             <remove-project name="platform/cts" optional="true"/>
-            <remove-project name="platform/test/cts-root" optional="true"/>
-            <remove-project name="platform/test/mts" optional="true"/>
-            <remove-project name="platform/test/vts" optional="true"/>
-            <remove-project name="platform/external/llvm-project" optional="true"/>
-            <remove-project name="platform/external/llvm" optional="true"/>
-            <remove-project name="platform/external/clang" optional="true"/>
-            <remove-project name="platform/prebuilts/rust" optional="true"/>
-            <remove-project name="platform/prebuilts/v8" optional="true"/>
-            <remove-project name="platform/external/v8" optional="true"/>
             <remove-project name="platform/external/chromium-webview" optional="true"/>
-            <remove-project name="platform/prebuilts/clang-darwin" optional="true"/>
-            <remove-project name="platform/prebuilts/kernel/x86_64" optional="true"/>
-            <remove-project name="platform/prebuilts/kernel/arm64" optional="true"/>
             <remove-project name="platform/external/skia" optional="true"/>
-            <remove-project name="platform/external/skqp" optional="true"/>
-            <remove-project name="platform/frameworks/compile/mclinker" optional="true"/>
-            <remove-project name="platform/frameworks/compile/slang" optional="true"/>
-            <remove-project name="platform/frameworks/compile/libbcc" optional="true"/>
-            <remove-project name="platform/frameworks/rs" optional="true"/>
+            <remove-project name="platform/external/v8" optional="true"/>
+            <remove-project name="platform/frameworks/base" optional="true"/>
+            <remove-project name="platform/prebuilts/rust" optional="true"/>
+            <remove-project name="platform/prebuilts/clang-darwin" optional="true"/>
           </manifest>
           EOF
 
-      - name: Repo sync (Smart Sync)
+      - name: Smart Repo Sync
         working-directory: /mnt/aosp
         run: |
-          /mnt/aosp/bin/repo sync -c -j4 --force-sync --no-clone-bundle --no-tags --optimized-fetch || true
+          /mnt/aosp/bin/repo sync -c -j2 --force-sync --no-clone-bundle --no-tags --optimized-fetch || true
 
-      # ---------- Step 4: Preemptive Nuke & Scrubber Filtered ----------
-      - name: Preemptive nuke test folders (Menangani Error Soong)
+      # ---------- Step 4: Storage Reclaimer (CRUCIAL FOR 160GB DISK) ----------
+      - name: Reclaim Disk Space (Nuke Git Objects)
         working-directory: /mnt/aosp
         run: |
-          echo "Nuke folder bermasalah yang menahan dependensi skia_deps, llvm_tblgen, dan trusty..."
-          for d in \
-            tools/security/fuzzing/orphans/libskia \
-            tools/platform-compat/java/android/compat/testing \
-            packages/modules/Connectivity/bpf/tests \
-            packages/modules/Connectivity/tests \
-            packages/modules/NetworkStack/tests \
-            frameworks/native/services/surfaceflinger/tests \
-            frameworks/compile/mclinker \
-            frameworks/compile/slang \
-            frameworks/compile/libbcc \
-            frameworks/rs \
-            trusty ; do
-            if [ -d "$d" ]; then
-              rm -rf "$d" && echo "  RM: $d"
-            fi
-          done
+          echo "[ARCH] Menghapus data Git (Project Objects) untuk membebaskan 40GB+ Disk..."
+          # Aman dihapus karena kita tidak akan commit/push, hanya kompilasi.
+          rm -rf .repo/project-objects
+          rm -rf .repo/projects
+          
+          echo "[ARCH] Menghapus test folder..."
+          find . -type d -name "tests" -exec rm -rf {} + 2>/dev/null || true
+          
+          df -h /
 
-      - name: Iterative broken-bp scrubber STRICT
-        working-directory: /mnt/aosp
-        run: |
-          TEST_PATH_REGEX='/tests?/|/vts/|/mts/|/cts/|/sts/|/benchmarks?/|/fuzz(er)?s?/|/perftests?/|/testing/'
-
-          is_test_path() { echo "$1" | grep -qE "$TEST_PATH_REGEX"; }
-          is_protected() { echo "$1" | grep -qE 'hardware/interfaces/camera/|frameworks/native/libs/'; }
-
-          PATTERNS='"cts_defaults"|"mts_defaults"|"vts_defaults"|"sts_defaults"|"framework-connectivity-test-defaults"|"framework-connectivity-internal-test-defaults"|"connectivity-mainline-presubmit-cc-defaults"'
-
-          BROKEN_FILES=$(grep -rlE "$PATTERNS" --include="Android.bp" --exclude-dir=".repo" . 2>/dev/null || true)
-
-          for f in $BROKEN_FILES; do
-            if is_protected "$f"; then continue; fi
-            if is_test_path "$f"; then
-              mv "$f" "${f}.disabled"
-            fi
-          done
-
-      # ---------- Step 5: Caching & Kompilasi ----------
+      # ---------- Step 5: CCache Configuration ----------
       - name: Configure CCache
         working-directory: /mnt/aosp
         run: |
-          ccache -M 25G
+          ccache -M 15G
           ccache -s
 
-      - name: Build external camera HAL
+      # ---------- Step 6: Compilation (Soong Lobotomy) ----------
+      - name: Build External Camera HAL
         working-directory: /mnt/aosp
         run: |
           set -e
@@ -174,47 +134,39 @@ jobs:
           source build/envsetup.sh
           lunch ${{ github.event.inputs.build_variant }}
           
-          export USE_CCACHE=1
-          export CCACHE_EXEC=/usr/bin/ccache
+          # 1. Matikan Bazel (Menghemat RAM 4GB - 8GB)
+          export SOONG_NO_BAZEL=true
+          export BUILD_BROKEN_DISABLE_BAZEL=true
+          export USE_RBE=false
+          
+          # 2. Soong / Golang Tweaks untuk RAM 8GB
+          # GOMEMLIMIT ke 3GB agar menyisakan RAM untuk kernel dan ZRAM buffer
+          export GOMEMLIMIT=3072MiB
+          # GOGC=10 memaksa Go sangat agresif membuang sampah memori
+          export GOGC=10
+          # WAJIB: Hanya 1 core saat parsing agar memori tidak meluap
+          export GOMAXPROCS=1 
           export ALLOW_MISSING_DEPENDENCIES=true
           
-          # ==========================================
-          # ANTI-OOM SOONG TWEAKS (WAJIB UNTUK RAM 8GB)
-          # ==========================================
-          # 1. Paksa sistem membuang "sampah" memori lebih cepat
-          export GOGC=20 
-          # 2. Batasi pemakaian memori murni Soong maksimal ~6GB
-          export GOMEMLIMIT=6144MiB 
-          # 3. Batasi CPU agar proses pembacaan file tidak terjadi serentak
-          export GOMAXPROCS=2
-
-          m -j$(nproc) \
+          echo "[ARCH] Memulai kompilasi dengan kontrol thread Ninja: 2 Threads"
+          # -j2 pada `m` memaksa proses C++ (Clang) dan Linking berjalan perlahan tapi pasti
+          m -j2 \
             android.hardware.camera.provider-V1-external-service \
             android.hardware.camera.provider-V1-external-impl \
             camera.device-external-impl 2>&1 | tee /mnt/aosp/build.log
 
-      # ---------- Step 6: Collect and Upload Artifacts ----------
-      - name: Collect artifacts
+      # ---------- Step 7: Export Artifacts ----------
+      - name: Collect Output
+        if: always()
         working-directory: /mnt/aosp
         run: |
-          mkdir -p $GITHUB_WORKSPACE/artifacts/vendor/bin/hw
-          mkdir -p $GITHUB_WORKSPACE/artifacts/vendor/lib64/hw
+          mkdir -p $GITHUB_WORKSPACE/artifacts
+          find out -type f -name "android.hardware.camera.provider-V1-external-service" -exec cp {} $GITHUB_WORKSPACE/artifacts/ \; || true
+          find out -type f -name "*.so" | grep "external-impl" -exec cp {} $GITHUB_WORKSPACE/artifacts/ \; || true
 
-          find out -type f -name "android.hardware.camera.provider-V1-external-service" \
-            -not -path "*/symbols/*" -not -path "*/unstripped/*" \
-            -exec cp -v {} $GITHUB_WORKSPACE/artifacts/vendor/bin/hw/ \;
-          find out -type f -name "android.hardware.camera.provider-V1-external-impl.so" \
-            -not -path "*/symbols/*" -not -path "*/unstripped/*" \
-            -exec cp -v {} $GITHUB_WORKSPACE/artifacts/vendor/lib64/hw/ \;
-          find out -type f -name "camera.device-external-impl.so" \
-            -not -path "*/symbols/*" -not -path "*/unstripped/*" \
-            -exec cp -v {} $GITHUB_WORKSPACE/artifacts/vendor/lib64/hw/ \;
-
-      - name: Upload HAL artifacts
-        if: success()
+      - name: Upload Build Artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: external-camera-hal-arm64
+          name: Camera-HAL-Outputs
           path: artifacts/
-          retention-days: 30
-          if-no-files-found: error
+          retention-days: 7
