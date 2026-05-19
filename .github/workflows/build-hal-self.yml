@@ -1,4 +1,4 @@
-name: Build External Camera HAL (AIDL V1) v10.2 Self-Hosted Resumable
+name: Build External Camera HAL (AIDL V1) v10.3 Self-Hosted Resumable
 
 # ============================================================================
 # Phase 4A v10.2 - VCam Project (Santuyajah) - SELF-HOSTED VPS 160GB
@@ -70,7 +70,7 @@ on:
 
 jobs:
   build:
-    name: Build External Camera HAL (Self-Hosted v10.2, Resumable)
+    name: Build External Camera HAL (Self-Hosted v10.3, Resumable)
     runs-on: self-hosted
     timeout-minutes: 1200
 
@@ -282,8 +282,10 @@ jobs:
 
           NEW_HASH=$(sha256sum .repo/local_manifests/skip_safe.xml | awk '{print $1}')
           if [ "$OLD_HASH" != "$NEW_HASH" ]; then
-            echo "Manifest berubah. Invalidate sync marker."
-            rm -f ${STATE_DIR}/repo_sync_*.done
+            echo "Manifest berubah dari run sebelumnya."
+            echo "TIDAK menghapus sync marker - 'repo sync' biasa cukup pintar"
+            echo "untuk fetch project baru & menghapus project yang dihapus dari manifest."
+            echo "(v10.1 dulu hapus marker -> bikin full sync ulang ~jam2-an, itu overkill)"
           else
             echo "Manifest sama dengan run sebelumnya."
           fi
@@ -305,6 +307,7 @@ jobs:
 
           if [ -f "$SYNC_MARKER" ]; then
             echo "Sync sebelumnya sukses. Light-sync incremental..."
+            echo "(Akan tetap fetch project baru / drop project yg dihapus dari manifest)"
             ${AOSP_ROOT}/bin/repo sync \
               -c -j$(nproc) --no-clone-bundle --no-tags --optimized-fetch \
               --fail-fast || {
