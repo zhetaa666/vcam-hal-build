@@ -22,7 +22,7 @@ on:
 jobs:
   build:
     name: Build External Camera HAL (Self-Hosted)
-    runs-on: self-hosted
+    runs-on: ubuntu-22.04
     timeout-minutes: 600
 
     env:
