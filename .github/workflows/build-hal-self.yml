@@ -31,7 +31,7 @@ jobs:
       CCACHE_EXEC: /usr/bin/ccache
 
     steps:
-# ---------- Step 1: Disk Space & Memory Architecture ----------
+ 
 # ---------- Step 1: Disk Space & Memory Architecture ----------
       - name: Architect Memory & Storage (Fail-safe Swap & Permissions)
         run: |
@@ -39,7 +39,6 @@ jobs:
           sudo swapoff -a || true
           sudo rm -f /swapfile || true
           
-          # Hapus menggunakan sudo, lalu buat ulang
           sudo rm -rf /mnt/aosp/tmpdir
           sudo mkdir -p /mnt/aosp/tmpdir /mnt/aosp/.ccache
           
@@ -48,8 +47,12 @@ jobs:
           sudo rm -rf /mnt/aosp/.repo/projects || true
           
           # ==========================================================
-          # FIX: KEMBALIKAN HAK AKSES KE USER NORMAL AGAR GO BISA MENULIS
+          # FIX: Hapus cache 'Repo' root yang nyangkut di sistem OS
           # ==========================================================
+          sudo rm -f /etc/.repo_gitconfig.json || true
+          sudo rm -f ~/.repo_gitconfig.json || true
+          
+          # Kembalikan hak akses environment
           sudo chown -R $USER:$USER /mnt/aosp
           sudo chmod 1777 /mnt/aosp/tmpdir /mnt/aosp/.ccache
           
