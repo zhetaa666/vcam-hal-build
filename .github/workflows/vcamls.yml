@@ -1,6 +1,5 @@
 name: Build VCam LSPosed Module
 
-# Workflow akan berjalan saat Anda menekan tombol "Run workflow" secara manual
 on:
   workflow_dispatch:
 
@@ -15,32 +14,49 @@ jobs:
           distribution: 'temurin'
           java-version: '17'
 
+      - name: ⚙️ Setup Mesin Gradle 8.4 (Anti-Crash)
+        uses: gradle/actions/setup-gradle@v3
+        with:
+          gradle-version: '8.4'
+
       - name: 📝 Generate Android Project & Hook Source Code
         run: |
           echo "Membuat struktur folder..."
           mkdir -p app/src/main/java/com/santuyajah/vcamhook
           mkdir -p app/src/main/assets
 
-          echo "Membuat settings.gradle..."
+          echo "Membuat settings.gradle Modern..."
           cat << 'EOF' > settings.gradle
+          pluginManagement {
+              repositories {
+                  google()
+                  mavenCentral()
+                  gradlePluginPortal()
+              }
+          }
+          dependencyResolutionManagement {
+              repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+              repositories {
+                  google()
+                  mavenCentral()
+              }
+          }
           rootProject.name = "VCamHook"
           include ':app'
           EOF
 
           echo "Membuat build.gradle (Root)..."
           cat << 'EOF' > build.gradle
-          buildscript {
-              repositories { google(); mavenCentral() }
-              dependencies { classpath 'com.android.tools.build:gradle:8.1.1' }
-          }
-          allprojects {
-              repositories { google(); mavenCentral() }
+          plugins {
+              id 'com.android.application' version '8.1.1' apply false
           }
           EOF
 
           echo "Membuat build.gradle (App)..."
           cat << 'EOF' > app/build.gradle
-          plugins { id 'com.android.application' }
+          plugins {
+              id 'com.android.application'
+          }
           android {
               namespace 'com.santuyajah.vcamhook'
               compileSdk 34
@@ -52,7 +68,9 @@ jobs:
                   versionName "1.0-VIP"
               }
           }
-          dependencies { compileOnly 'de.robv.android.xposed:api:82' }
+          dependencies {
+              compileOnly 'de.robv.android.xposed:api:82'
+          }
           EOF
 
           echo "Membuat AndroidManifest.xml..."
@@ -121,11 +139,8 @@ jobs:
           }
           EOF
 
-      - name: 🛠️ Inisialisasi Gradle Wrapper (Versi Fix 8.4)
-        run: gradle wrapper --gradle-version 8.4
-
-      - name: 🚀 Compile APK!
-        run: ./gradlew assembleDebug
+      - name: 🚀 Compile APK! (Bypass Wrapper)
+        run: gradle assembleDebug
 
       - name: 📦 Kumpulkan Artifact APK
         uses: actions/upload-artifact@v4
