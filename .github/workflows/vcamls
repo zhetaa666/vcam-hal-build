@@ -1,0 +1,134 @@
+name: Build VCam LSPosed Module
+
+# Workflow akan berjalan saat Anda menekan tombol "Run workflow" secara manual
+on:
+  workflow_dispatch:
+
+jobs:
+  build-apk:
+    runs-on: ubuntu-22.04
+
+    steps:
+      - name: ⚙️ Setup Java 17
+        uses: actions/setup-java@v3
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: 📝 Generate Android Project & Hook Source Code
+        run: |
+          echo "Membuat struktur folder..."
+          mkdir -p app/src/main/java/com/santuyajah/vcamhook
+          mkdir -p app/src/main/assets
+
+          echo "Membuat settings.gradle..."
+          cat << 'EOF' > settings.gradle
+          rootProject.name = "VCamHook"
+          include ':app'
+          EOF
+
+          echo "Membuat build.gradle (Root)..."
+          cat << 'EOF' > build.gradle
+          buildscript {
+              repositories { google(); mavenCentral() }
+              dependencies { classpath 'com.android.tools.build:gradle:8.1.1' }
+          }
+          allprojects {
+              repositories { google(); mavenCentral(); maven { url 'https://api.xposed.info/' } }
+          }
+          EOF
+
+          echo "Membuat build.gradle (App)..."
+          cat << 'EOF' > app/build.gradle
+          plugins { id 'com.android.application' }
+          android {
+              namespace 'com.santuyajah.vcamhook'
+              compileSdk 34
+              defaultConfig {
+                  applicationId "com.santuyajah.vcamhook"
+                  minSdk 24
+                  targetSdk 34
+                  versionCode 1
+                  versionName "1.0-VIP"
+              }
+          }
+          dependencies { compileOnly 'de.robv.android.xposed:api:82' }
+          EOF
+
+          echo "Membuat AndroidManifest.xml..."
+          cat << 'EOF' > app/src/main/AndroidManifest.xml
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+              <application android:label="VCam Hook (Santuyajah)" android:icon="@android:drawable/ic_menu_camera">
+                  <meta-data android:name="xposedmodule" android:value="true" />
+                  <meta-data android:name="xposeddescription" android:value="Membelokkan Kamera Asli ke Kamera 103 (VCam)" />
+                  <meta-data android:name="xposedminversion" android:value="54" />
+              </application>
+          </manifest>
+          EOF
+
+          echo "Membuat Inisialisasi Xposed..."
+          cat << 'EOF' > app/src/main/assets/xposed_init
+          com.santuyajah.vcamhook.MainHook
+          EOF
+
+          echo "Membuat Kode Java Injeksi (MainHook.java)..."
+          cat << 'EOF' > app/src/main/java/com/santuyajah/vcamhook/MainHook.java
+          package com.santuyajah.vcamhook;
+
+          import de.robv.android.xposed.IXposedHookLoadPackage;
+          import de.robv.android.xposed.XC_MethodHook;
+          import de.robv.android.xposed.XposedBridge;
+          import de.robv.android.xposed.XposedHelpers;
+          import de.robv.android.xposed.callbacks.XC_LoadPackage.LoadPackageParam;
+
+          public class MainHook implements IXposedHookLoadPackage {
+              @Override
+              public void handleLoadPackage(LoadPackageParam lpparam) throws Throwable {
+                  // Hook Camera2 API (Aplikasi Modern seperti WA/IG)
+                  XC_MethodHook camera2Hook = new XC_MethodHook() {
+                      @Override
+                      protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
+                          String reqId = (String) param.args[0];
+                          if ("1".equals(reqId) || "0".equals(reqId)) {
+                              XposedBridge.log("VCAM-HOOK: Mengubah Kamera " + reqId + " menjadi VCam 103!");
+                              param.args[0] = "103"; // INI JURUS TUKAR KAMERANYA!
+                          }
+                      }
+                  };
+
+                  try {
+                      XposedHelpers.findAndHookMethod("android.hardware.camera2.CameraManager", lpparam.classLoader, 
+                          "openCamera", String.class, "android.hardware.camera2.CameraDevice.StateCallback", "android.os.Handler", camera2Hook);
+                      XposedHelpers.findAndHookMethod("android.hardware.camera2.CameraManager", lpparam.classLoader, 
+                          "openCamera", String.class, "java.util.concurrent.Executor", "android.hardware.camera2.CameraDevice.StateCallback", camera2Hook);
+                  } catch (Throwable t) {}
+
+                  // Hook Camera1 API (Aplikasi Jadul)
+                  try {
+                      XposedHelpers.findAndHookMethod("android.hardware.Camera", lpparam.classLoader, "open", int.class, new XC_MethodHook() {
+                          @Override
+                          protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
+                              int reqId = (Integer) param.args[0];
+                              if (reqId == 1 || reqId == 0) {
+                                  XposedBridge.log("VCAM-HOOK: Mengubah Camera1 dari " + reqId + " ke 103!");
+                                  param.args[0] = 103;
+                              }
+                          }
+                      });
+                  } catch (Throwable t) {}
+              }
+          }
+          EOF
+
+      - name: 🛠️ Inisialisasi Gradle Wrapper
+        run: gradle wrapper
+
+      - name: 🚀 Compile APK!
+        run: ./gradlew assembleDebug
+
+      - name: 📦 Kumpulkan Artifact APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: VCamHook_Santuyajah
+          path: app/build/outputs/apk/debug/app-debug.apk
