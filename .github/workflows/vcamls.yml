@@ -34,7 +34,7 @@ jobs:
               dependencies { classpath 'com.android.tools.build:gradle:8.1.1' }
           }
           allprojects {
-              repositories { google(); mavenCentral(); maven { url 'https://api.xposed.info/' } }
+              repositories { google(); mavenCentral() }
           }
           EOF
 
@@ -121,8 +121,8 @@ jobs:
           }
           EOF
 
-      - name: 🛠️ Inisialisasi Gradle Wrapper
-        run: gradle wrapper
+      - name: 🛠️ Inisialisasi Gradle Wrapper (Versi Fix 8.4)
+        run: gradle wrapper --gradle-version 8.4
 
       - name: 🚀 Compile APK!
         run: ./gradlew assembleDebug
